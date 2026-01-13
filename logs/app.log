@@ -1,0 +1,274 @@
+2026-01-12 20:40:57,723 | INFO | semi_beam | Logging inicializado. Archivo: logs\app.log
+2026-01-12 20:42:17,170 | INFO | semi_beam | Logging inicializado. Archivo: logs\app.log
+2026-01-12 20:43:25,170 | INFO | semi_beam | Logging inicializado. Archivo: logs\app.log
+2026-01-12 20:54:47,354 | INFO | semi_beam | Logging inicializado. Archivo: logs\app.log
+2026-01-12 20:54:57,887 | ERROR | semi_beam | Error al generar la memoria (PDF).
+Traceback (most recent call last):
+  File "c:\Users\perez\OneDrive\Escritorio\General\Lambert\semi_beam\src\semi_beam\ui\main_window.py", line 1209, in _export_memoria_pdf
+    apoyos.append(("Rt", f"x∈[{_fmt_plain(case.tandem.x_min_mm, 0)}, {_fmt_plain(case.tandem.x_max_mm, 0)}] mm; R={_fmt_plain(case.tandem.reaction_user, 2)} kg (usuario)"))
+                               ~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\perez\OneDrive\Escritorio\General\Lambert\semi_beam\src\semi_beam\ui\main_window.py", line 158, in _fmt_plain
+    s = f"{float(v):.{decimals}f}"
+           ~~~~~^^^
+TypeError: float() argument must be a string or a real number, not 'NoneType'
+
+2026-01-12 20:58:44,979 | INFO | semi_beam | Logging inicializado. Archivo: logs\app.log
+2026-01-12 20:58:52,578 | ERROR | semi_beam | Error al generar la memoria (PDF).
+Traceback (most recent call last):
+  File "c:\Users\perez\OneDrive\Escritorio\General\Lambert\semi_beam\src\semi_beam\ui\main_window.py", line 1234, in _export_memoria_pdf
+    header = MemoriaHeader(
+        titulo=f"Memoria de Cálculo — {tab.title}",
+    ...<3 lines>...
+        revision="A",
+    )
+TypeError: MemoriaHeader.__init__() got an unexpected keyword argument 'cliente_proyecto'
+
+2026-01-12 21:06:31,007 | INFO | semi_beam | Logging inicializado. Archivo: logs\app.log
+2026-01-12 21:06:42,259 | ERROR | semi_beam | Error al generar la memoria (PDF).
+Traceback (most recent call last):
+  File "c:\Users\perez\OneDrive\Escritorio\General\Lambert\semi_beam\src\semi_beam\ui\main_window.py", line 1234, in _export_memoria_pdf
+    header = MemoriaHeader(
+        titulo=f"Memoria de Cálculo — {tab.title}",
+    ...<3 lines>...
+        revision="A",
+    )
+TypeError: MemoriaHeader.__init__() got an unexpected keyword argument 'cliente_proyecto'
+
+2026-01-12 21:18:55,070 | INFO | semi_beam | Logging inicializado. Archivo: logs\app.log
+2026-01-12 21:18:55,666 | ERROR | semi_beam | Excepción no capturada:
+Traceback (most recent call last):
+  File "c:\Users\perez\OneDrive\Escritorio\General\Lambert\semi_beam\scripts\run_app.py", line 23, in <module>
+    from semi_beam.ui.main_window import main
+  File "c:\Users\perez\OneDrive\Escritorio\General\Lambert\semi_beam\src\semi_beam\ui\main_window.py", line 176, in <module>
+    class SessionCache:
+    ...<5 lines>...
+        memoria_header: dict = field(default_factory=dict)
+  File "c:\Users\perez\OneDrive\Escritorio\General\Lambert\semi_beam\src\semi_beam\ui\main_window.py", line 182, in SessionCache
+    memoria_header: dict = field(default_factory=dict)
+                           ^^^^^
+NameError: name 'field' is not defined
+
+2026-01-12 21:21:48,183 | INFO | semi_beam | Logging inicializado. Archivo: logs\app.log
+2026-01-12 21:21:48,738 | ERROR | semi_beam | Excepción no capturada:
+Traceback (most recent call last):
+  File "c:\Users\perez\OneDrive\Escritorio\General\Lambert\semi_beam\scripts\run_app.py", line 23, in <module>
+    from semi_beam.ui.main_window import main
+  File "c:\Users\perez\OneDrive\Escritorio\General\Lambert\semi_beam\src\semi_beam\ui\main_window.py", line 176, in <module>
+    class SessionCache:
+    ...<5 lines>...
+        memoria_header: dict = field(default_factory=dict)
+  File "c:\Users\perez\OneDrive\Escritorio\General\Lambert\semi_beam\src\semi_beam\ui\main_window.py", line 182, in SessionCache
+    memoria_header: dict = field(default_factory=dict)
+                           ^^^^^
+NameError: name 'field' is not defined
+
+2026-01-12 21:22:27,394 | INFO | semi_beam | Logging inicializado. Archivo: logs\app.log
+2026-01-12 21:23:08,463 | ERROR | semi_beam | Error al generar la memoria (PDF).
+Traceback (most recent call last):
+  File "c:\Users\perez\OneDrive\Escritorio\General\Lambert\semi_beam\src\semi_beam\ui\main_window.py", line 1239, in _export_memoria_pdf
+    if dlg.exec() != dlg.Accepted:
+                     ^^^^^^^^^^^^
+AttributeError: 'MemoriaHeaderDialog' object has no attribute 'Accepted'. Did you mean: 'accepted'?
+
+2026-01-12 21:29:59,876 | INFO | semi_beam | Logging inicializado. Archivo: logs\app.log
+2026-01-12 21:30:24,381 | ERROR | semi_beam | Error al generar la memoria (PDF).
+Traceback (most recent call last):
+  File "c:\Users\perez\OneDrive\Escritorio\General\Lambert\semi_beam\src\semi_beam\ui\main_window.py", line 1254, in _export_memoria_pdf
+    caso = MemoriaCaso(
+        unidad=tab.title,
+    ...<4 lines>...
+        cargas=cargas,
+    )
+TypeError: MemoriaCaso.__init__() got an unexpected keyword argument 'unidad'
+
+2026-01-12 21:30:45,286 | ERROR | semi_beam | Error al generar la memoria (PDF).
+Traceback (most recent call last):
+  File "c:\Users\perez\OneDrive\Escritorio\General\Lambert\semi_beam\src\semi_beam\ui\main_window.py", line 1254, in _export_memoria_pdf
+    caso = MemoriaCaso(
+        unidad=tab.title,
+    ...<4 lines>...
+        cargas=cargas,
+    )
+TypeError: MemoriaCaso.__init__() got an unexpected keyword argument 'unidad'
+
+2026-01-12 21:39:20,548 | INFO | semi_beam | Logging inicializado. Archivo: logs\app.log
+2026-01-12 21:39:36,878 | ERROR | semi_beam | Error al generar la memoria (PDF).
+Traceback (most recent call last):
+  File "c:\Users\perez\OneDrive\Escritorio\General\Lambert\semi_beam\src\semi_beam\ui\main_window.py", line 1196, in _export_memoria_pdf
+    tmpdir = tempfile.mkdtemp(prefix="semi_beam_memoria_")
+             ^^^^^^^^
+UnboundLocalError: cannot access local variable 'tempfile' where it is not associated with a value
+
+2026-01-12 22:07:02,984 | INFO | semi_beam | Logging inicializado. Archivo: logs\app.log
+2026-01-12 22:07:03,610 | ERROR | semi_beam | Excepción no capturada:
+Traceback (most recent call last):
+  File "c:\Users\perez\OneDrive\Escritorio\General\Lambert\semi_beam\scripts\run_app.py", line 23, in <module>
+    from semi_beam.ui.main_window import main
+  File "c:\Users\perez\OneDrive\Escritorio\General\Lambert\semi_beam\src\semi_beam\ui\main_window.py", line 34, in <module>
+    from semi_beam.ui.numeric_delegates import NumericDelegateFloat, NumericDelegateInt
+ModuleNotFoundError: No module named 'semi_beam.ui.numeric_delegates'
+
+2026-01-12 22:07:14,058 | INFO | semi_beam | Logging inicializado. Archivo: logs\app.log
+2026-01-12 22:07:14,562 | ERROR | semi_beam | Excepción no capturada:
+Traceback (most recent call last):
+  File "c:\Users\perez\OneDrive\Escritorio\General\Lambert\semi_beam\scripts\run_app.py", line 23, in <module>
+    from semi_beam.ui.main_window import main
+  File "c:\Users\perez\OneDrive\Escritorio\General\Lambert\semi_beam\src\semi_beam\ui\main_window.py", line 34, in <module>
+    from semi_beam.ui.numeric_delegates import NumericDelegateFloat, NumericDelegateInt
+ModuleNotFoundError: No module named 'semi_beam.ui.numeric_delegates'
+
+2026-01-12 22:19:17,016 | INFO | semi_beam | Logging inicializado. Archivo: logs\app.log
+2026-01-12 22:19:52,305 | ERROR | semi_beam | Error al generar la memoria (PDF).
+Traceback (most recent call last):
+  File "c:\Users\perez\OneDrive\Escritorio\General\Lambert\semi_beam\src\semi_beam\ui\main_window.py", line 1314, in _export_memoria_pdf
+    export_memoria_pdf(
+    ~~~~~~~~~~~~~~~~~~^
+        path,
+        ^^^^^
+    ...<9 lines>...
+        },
+        ^^
+    )
+    ^
+TypeError: export_memoria_pdf() got an unexpected keyword argument 'imagenes'
+
+2026-01-12 22:46:03,665 | INFO | semi_beam | Logging inicializado. Archivo: logs\app.log
+2026-01-12 22:46:41,527 | ERROR | semi_beam | Error al generar la memoria (PDF).
+Traceback (most recent call last):
+  File "c:\Users\perez\OneDrive\Escritorio\General\Lambert\semi_beam\src\semi_beam\ui\main_window.py", line 1421, in _export_memoria_pdf
+    export_memoria_pdf(
+    ~~~~~~~~~~~~~~~~~~^
+        path,
+        ^^^^^
+    ...<4 lines>...
+        imagenes=imgs,
+        ^^^^^^^^^^^^^^
+    )
+    ^
+TypeError: export_memoria_pdf() got an unexpected keyword argument 'imagenes'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "c:\Users\perez\OneDrive\Escritorio\General\Lambert\semi_beam\src\semi_beam\ui\main_window.py", line 1431, in _export_memoria_pdf
+    export_memoria_pdf(
+    ~~~~~~~~~~~~~~~~~~^
+        path,
+        ^^^^^
+    ...<4 lines>...
+        images=imgs,  # posible variante
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+TypeError: export_memoria_pdf() got an unexpected keyword argument 'images'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "c:\Users\perez\OneDrive\Escritorio\General\Lambert\semi_beam\src\semi_beam\ui\main_window.py", line 1442, in _export_memoria_pdf
+    export_memoria_pdf(path, header, caso, resultados, seccion_obj, imgs)
+    ~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\perez\OneDrive\Escritorio\General\Lambert\semi_beam\src\semi_beam\services\memoria_calculo_pdf.py", line 216, in export_memoria_pdf
+    if path and os.path.exists(path):
+                ^^
+NameError: name 'os' is not defined. Did you forget to import 'os'?
+
+2026-01-12 22:47:16,166 | ERROR | semi_beam | Error al generar la memoria (PDF).
+Traceback (most recent call last):
+  File "c:\Users\perez\OneDrive\Escritorio\General\Lambert\semi_beam\src\semi_beam\ui\main_window.py", line 1421, in _export_memoria_pdf
+    export_memoria_pdf(
+    ~~~~~~~~~~~~~~~~~~^
+        path,
+        ^^^^^
+    ...<4 lines>...
+        imagenes=imgs,
+        ^^^^^^^^^^^^^^
+    )
+    ^
+TypeError: export_memoria_pdf() got an unexpected keyword argument 'imagenes'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "c:\Users\perez\OneDrive\Escritorio\General\Lambert\semi_beam\src\semi_beam\ui\main_window.py", line 1431, in _export_memoria_pdf
+    export_memoria_pdf(
+    ~~~~~~~~~~~~~~~~~~^
+        path,
+        ^^^^^
+    ...<4 lines>...
+        images=imgs,  # posible variante
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+TypeError: export_memoria_pdf() got an unexpected keyword argument 'images'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "c:\Users\perez\OneDrive\Escritorio\General\Lambert\semi_beam\src\semi_beam\ui\main_window.py", line 1442, in _export_memoria_pdf
+    export_memoria_pdf(path, header, caso, resultados, seccion_obj, imgs)
+    ~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\perez\OneDrive\Escritorio\General\Lambert\semi_beam\src\semi_beam\services\memoria_calculo_pdf.py", line 216, in export_memoria_pdf
+    if path and os.path.exists(path):
+                ^^
+NameError: name 'os' is not defined. Did you forget to import 'os'?
+
+2026-01-12 22:50:21,757 | INFO | semi_beam | Logging inicializado. Archivo: logs\app.log
+2026-01-12 22:50:22,219 | ERROR | semi_beam | Excepción no capturada:
+Traceback (most recent call last):
+  File "c:\Users\perez\OneDrive\Escritorio\General\Lambert\semi_beam\scripts\run_app.py", line 23, in <module>
+    from semi_beam.ui.main_window import main
+  File "c:\Users\perez\OneDrive\Escritorio\General\Lambert\semi_beam\src\semi_beam\ui\main_window.py", line 42, in <module>
+    from semi_beam.services.memoria_calculo_pdf import (
+        export_memoria_pdf, MemoriaHeader, MemoriaCaso, MemoriaResultados, MemoriaSeccion
+    )
+  File "c:\Users\perez\OneDrive\Escritorio\General\Lambert\semi_beam\src\semi_beam\services\memoria_calculo_pdf.py", line 4
+    from __future__ import annotations
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+SyntaxError: from __future__ imports must occur at the beginning of the file
+
+2026-01-12 22:51:21,042 | INFO | semi_beam | Logging inicializado. Archivo: logs\app.log
+2026-01-12 22:51:21,508 | ERROR | semi_beam | Excepción no capturada:
+Traceback (most recent call last):
+  File "c:\Users\perez\OneDrive\Escritorio\General\Lambert\semi_beam\scripts\run_app.py", line 23, in <module>
+    from semi_beam.ui.main_window import main
+  File "c:\Users\perez\OneDrive\Escritorio\General\Lambert\semi_beam\src\semi_beam\ui\main_window.py", line 42, in <module>
+    from semi_beam.services.memoria_calculo_pdf import (
+        export_memoria_pdf, MemoriaHeader, MemoriaCaso, MemoriaResultados, MemoriaSeccion
+    )
+  File "c:\Users\perez\OneDrive\Escritorio\General\Lambert\semi_beam\src\semi_beam\services\memoria_calculo_pdf.py", line 4
+    from __future__ import annotations
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+SyntaxError: from __future__ imports must occur at the beginning of the file
+
+2026-01-12 22:51:42,696 | INFO | semi_beam | Logging inicializado. Archivo: logs\app.log
+2026-01-12 23:01:03,530 | INFO | semi_beam | Logging inicializado. Archivo: logs\app.log
+2026-01-13 07:19:02,870 | INFO | semi_beam | Logging inicializado. Archivo: logs\app.log
+2026-01-13 07:19:04,199 | ERROR | semi_beam | Excepción no capturada:
+Traceback (most recent call last):
+  File "c:\Users\OFT1313\Desktop\semi_beam\scripts\run_app.py", line 23, in <module>
+    from semi_beam.ui.main_window import main
+  File "c:\Users\OFT1313\Desktop\semi_beam\src\semi_beam\ui\main_window.py", line 42, in <module>
+    from semi_beam.services.memoria_calculo_pdf import (
+        export_memoria_pdf, MemoriaHeader, MemoriaCaso, MemoriaResultados, MemoriaSeccion
+    )
+  File "c:\Users\OFT1313\Desktop\semi_beam\src\semi_beam\services\memoria_calculo_pdf.py", line 9, in <module>
+    from reportlab.lib import colors, pagesizes
+ModuleNotFoundError: No module named 'reportlab'
+
+2026-01-13 07:20:52,258 | INFO | semi_beam | Logging inicializado. Archivo: logs\app.log
+2026-01-13 07:27:52,194 | INFO | semi_beam | Logging inicializado. Archivo: logs\app.log
+2026-01-13 07:27:52,230 | ERROR | semi_beam | Excepción no capturada:
+Traceback (most recent call last):
+  File "c:\Users\OFT1313\Desktop\semi_beam\scripts\run_app.py", line 23, in <module>
+    from semi_beam.ui.main_window import main
+  File "c:\Users\OFT1313\Desktop\semi_beam\src\semi_beam\ui\main_window.py", line 11, in <module>
+    import matplotlib
+ModuleNotFoundError: No module named 'matplotlib'
+
+2026-01-13 07:28:32,350 | INFO | semi_beam | Logging inicializado. Archivo: logs\app.log
+2026-01-13 07:33:37,030 | INFO | semi_beam | Logging inicializado. Archivo: logs\app.log
+2026-01-13 07:37:45,211 | INFO | semi_beam | Logging inicializado. Archivo: logs\app.log
+2026-01-13 07:39:33,200 | INFO | semi_beam | Logging inicializado. Archivo: logs\app.log
+2026-01-13 07:45:13,391 | INFO | semi_beam | Logging inicializado. Archivo: logs\app.log
+2026-01-13 08:47:05,206 | INFO | semi_beam | Logging inicializado. Archivo: logs\app.log

@@ -1,0 +1,85 @@
+# =========================
+# Python
+# =========================
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# Packaging / build
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+wheelhouse/
+
+# Unit test / coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+pytest.xml
+
+# Type checkers / linters
+.mypy_cache/
+.pyright/
+.ruff_cache/
+
+# Jupyter / notebooks
+.ipynb_checkpoints/
+
+# Logs
+*.log
+
+# =========================
+# PyInstaller
+# =========================
+# keep .spec tracked if you create it; don't ignore it by default
+# *.spec
+*.manifest
+
+# =========================
+# IDEs / Editors
+# =========================
+.vscode/
+.idea/
+*.iml
+
+# =========================
+# OS files
+# =========================
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# =========================
+# Project-local artifacts
+# =========================
+# Environment variables / secrets
+.env
+.env.*
+!.env.example
+
+# Common output folders (exports/reports)
+exports/
+export/
+out/
+output/
+reports/
+report/
+tmp/
+temp/
+
+# Optional: local database or cache (if you add it later)
+*.sqlite
+*.sqlite3
+
+# Optional: user-specific settings
+*.ini

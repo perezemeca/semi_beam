@@ -1,0 +1,14 @@
+id;family;brand;grade;thk_min_mm;thk_max_mm;sigma_adm_kgcm2;sigma_basis;rm_kgcm2;rm_basis;sigma_g1_40_kgcm2;sigma_g1_50_kgcm2;sigma_g1_60_kgcm2;notes
+STR700MC;HLE_STRUCTURAL;SSAB;Strenx 700MC;3.0;10.0;7138.013;MIN_GUARANTEED;7647.872;MIN_GUARANTEED;5098.581;4758.679;4461.258;"Thermo-mechanical HSLA; typical for lightweight chassis; confirm MTC by thickness."
+STR700PLATE;HLE_STRUCTURAL;SSAB/EN;Strenx 700 plate (S690QL/QL1 class);4.0;19.0;7138.013;MIN_GUARANTEED;7953.786;MIN_GUARANTEED;5098.581;4758.679;4461.258;"Quenched & tempered plate; suitable for 10-19 mm when you need guaranteed 700 MPa."
+STR900MC;HLE_STRUCTURAL;SSAB;Strenx 900MC;3.0;10.0;9177.446;MIN_GUARANTEED;9483.361;MIN_GUARANTEED;6555.317;6118.297;5735.904;"Very high yield HSLA; check forming radius and welding procedure."
+HDOX400;WEAR_AR;SSAB;Hardox 400;3.0;19.0;10197.162;TYPICAL_NOT_GUARANTEED;12746.453;TYPICAL;7283.69;6798.111;6373.226;"Wear plate; yield is typically high but design should rely on MTC values per heat."
+HDOX450;WEAR_AR;SSAB;Hardox 450;3.2;19.0;12746.453;TYPICAL_NOT_GUARANTEED;14276.027;TYPICAL;9104.608;8497.632;7966.533;"Wear plate; commonly used when dent resistance matters; always request EN10204 3.1 MTC."
+HDOX500;WEAR_AR;SSAB;Hardox 500;4.0;19.0;14276.027;TYPICAL_NOT_GUARANTEED;15805.601;TYPICAL;10197.162;9517.348;8922.517;"Wear plate; higher hardness; check cutting/welding parameters; rely on MTC for design."
+MLC380;MICROALLOYED;Ternium (ex Siderar);MLC-380;3.0;12.5;3874.922;MIN_GUARANTEED;4690.695;MIN_GUARANTEED;2767.806;2583.278;2421.826;"Microalloyed hot-rolled; often widely available; for 13-19 mm you may need plate alternatives."
+MLC420;MICROALLOYED;Ternium (ex Siderar);MLC-420;3.0;12.5;4282.808;MIN_GUARANTEED;4894.638;MIN_GUARANTEED;3059.149;2855.205;2676.755;"Microalloyed hot-rolled; common chassis grade; good baseline before moving to 700 MPa steels."
+MLC500;MICROALLOYED;Ternium;MLC 500 (confirm availability);3.0;12.5;5098.581;TARGET_MIN_CONFIRMED_BY_MTC;5710.411;TYPICAL_OR_TARGET;3641.845;3399.051;3186.613;"Include only if supplier certifies the grade by MTC; availability may be intermittent."
+DOMEX_PLACEHOLDER;HSLA_GENERIC;SSAB/Market;Domex (define exact grade: 420MC/460MC/700MC etc.);3.0;19.0;;UNKNOWN_UNTIL_GRADE_DEFINED;;UNKNOWN_UNTIL_GRADE_DEFINED;;;;"Market uses 'Domex' loosely; always request exact standard/grade + MTC."
+F24;STRUCTURAL;IRAM;F24;3.0;100.0;2396.333;NOMINAL_BY_STANDARD;;;;;;Agregado: fy nominal 235 MPa para verificación elástica.
+F36;STRUCTURAL;IRAM;F36;3.0;100.0;3619.993;NOMINAL_BY_STANDARD;5200.553;NOMINAL;;;;Agregado: fy nominal 355 MPa, rm nominal 510 MPa.
+SAE1010;CARBON_STEEL;SAE;1010 HR;3.0;19.0;1835.489;TYPICAL_HR;;;;;;Agregado: fy típico 180 MPa (depende condición). Reemplazar por MTC si aplica.
