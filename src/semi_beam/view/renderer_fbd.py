@@ -9,6 +9,7 @@ from matplotlib.path import Path
 from matplotlib.transforms import IdentityTransform
 
 from semi_beam.domain.cases import FBDData
+from semi_beam.view.label_placement import annotate_smart
 from semi_beam.view.style import RenderStyle
 
 
@@ -17,6 +18,31 @@ from semi_beam.view.style import RenderStyle
 # -------------------------
 def _ceil_mm(x: float) -> int:
     return int(math.ceil(float(x)))
+
+
+def _clamp(v: float, lo: float, hi: float) -> float:
+    return float(min(max(v, lo), hi))
+
+
+def _draw_stacked_side_labels(ax, labels: List[dict], *, side: str):
+    if not labels:
+        return
+    x_min, x_max = ax.get_xlim()
+    x_mid = 0.5 * (x_min + x_max)
+    ordered = sorted(labels, key=lambda item: float(item["xy"][0]))
+    for item in ordered:
+        x_anchor, y_anchor = item["xy"]
+        if side == "top":
+            prefer = ("NE", "NW", "SE", "SW") if float(x_anchor) <= x_mid else ("NW", "NE", "SW", "SE")
+        else:
+            prefer = ("SE", "SW", "NE", "NW") if float(x_anchor) <= x_mid else ("SW", "SE", "NW", "NE")
+        annotate_smart(
+            ax,
+            (float(x_anchor), float(y_anchor)),
+            str(item["text"]),
+            color=str(item["color"]),
+            prefer=prefer,
+        )
 
 
 def _draw_arrow(ax, x: float, y0: float, y1: float, style: RenderStyle):
@@ -165,6 +191,8 @@ def _draw_dimension_from_ref(
     text: str,
     gap_obj_mm: float,
     color: str = "blue",
+    renderer=None,
+    font_size: float = 9.0,
 ):
     lw = 0.9
     x0 = float(x_ref_real)
@@ -186,25 +214,28 @@ def _draw_dimension_from_ref(
     if span < 1e-6:
         return
 
-    # ---------- hueco centrado basado en ancho real del texto ----------
-    # Aseguramos renderer disponible
-    fig = ax.figure
-    fig.canvas.draw()
-    renderer = fig.canvas.get_renderer()
+    # ---------- hueco centrado basado en ancho del texto ----------
+    text_w_px = None
+    if renderer is not None:
+        t = ax.text(
+            xm, y, text,
+            ha="center", va="center",
+            fontsize=font_size,
+            color=color,
+            alpha=0.0,
+            zorder=0,
+        )
+        try:
+            bb = t.get_window_extent(renderer=renderer)
+            text_w_px = float(bb.width)
+        except Exception:
+            text_w_px = None
+        finally:
+            t.remove()
 
-    # Creamos el texto "dummy" para medir (NO visible)
-    t = ax.text(
-        xm, y, text,
-        ha="center", va="center",
-        fontsize=9,
-        color=color,
-        alpha=0.0,   # invisible
-        zorder=0
-    )
-    bb = t.get_window_extent(renderer=renderer)
-    t.remove()
-
-    text_w_px = bb.width
+    if text_w_px is None or not np.isfinite(text_w_px) or text_w_px <= 0.0:
+        # Fallback barato: aproximación lineal en píxeles por cantidad de caracteres.
+        text_w_px = max(18.0, 6.8 * len(text) + 10.0)
 
     # Convertimos px -> unidades de datos en X
     p0 = ax.transData.inverted().transform((0.0, 0.0))
@@ -265,7 +296,7 @@ def _draw_dimension_from_ref(
         text,
         ha="center",
         va="center",
-        fontsize=9,
+        fontsize=font_size,
         color=color,
         bbox=dict(facecolor="white", edgecolor="none", pad=0.9),
         zorder=20,
@@ -286,6 +317,7 @@ def render_fbd(
     L_car = float(_find_carrozable_end_mm(data))
 
     ax.clear()
+    ax._smart_label_bboxes = []
 
     arrow_h = (style.arrow_height_pctL / 100.0) * L_total
     dist_h = (style.dist_height_pctL / 100.0) * L_total
@@ -317,15 +349,6 @@ def render_fbd(
             for xi in xs:
                 _draw_arrow(ax, float(xi), dist_h, 0.0, style)
 
-            ax.text(
-                (x1 + x2) / 2.0,
-                dist_h + 0.04 * L_total,
-                f"{label}={q_user:g} kg/mm",
-                ha="center",
-                va="bottom",
-                fontsize=style.font_size,
-                color="red",
-            )
         else:  # up => abajo
             rect = Rectangle(
                 (x1, -dist_h),
@@ -343,15 +366,6 @@ def render_fbd(
             for xi in xs:
                 _draw_arrow(ax, float(xi), -dist_h, 0.0, style)
 
-            ax.text(
-                (x1 + x2) / 2.0,
-                -dist_h - 0.04 * L_total,
-                f"{label}={q_user:g} kg/mm",
-                ha="center",
-                va="top",
-                fontsize=style.font_size,
-                color="red",
-            )
 
     # Puntuales
     for pf in data.point_forces:
@@ -362,26 +376,8 @@ def render_fbd(
 
         if Fy < 0:  # down => arriba
             _draw_arrow(ax, x, arrow_h, 0.0, style)
-            ax.text(
-                x,
-                arrow_h + 0.02 * L_total,
-                f"{label}={val_user:g} kg",
-                ha="center",
-                va="bottom",
-                fontsize=style.font_size,
-                color="red",
-            )
         else:  # up => abajo
             _draw_arrow(ax, x, -arrow_h, 0.0, style)
-            ax.text(
-                x,
-                -arrow_h - 0.02 * L_total,
-                f"{label}={val_user:g} kg",
-                ha="center",
-                va="top",
-                fontsize=style.font_size,
-                color="red",
-            )
 
     # Momentos (se dibujan luego en px)
     moments_to_draw = list(data.moments)
@@ -439,8 +435,35 @@ def render_fbd(
     ax.set_ylim(min(bot_min, -max_y - 0.15 * L_total), max(top_max, max_y + 0.15 * L_total))
     ax.set_aspect("auto", adjustable="box")
 
+    renderer = None
+    canvas = getattr(ax.figure, "canvas", None)
+    if canvas is not None and hasattr(canvas, "get_renderer"):
+        try:
+            renderer = canvas.get_renderer()
+        except Exception:
+            renderer = None
+
     # REF
     #ax.text(0.0, y_top0 + 0.10 * max_y, "REF", ha="left", va="bottom", fontsize=9, color="red")
+
+    top_labels: List[dict] = []
+    bottom_labels: List[dict] = []
+    for dl in data.dist_loads:
+        label_text = f"{dl.label}={dl.q_user:g} kg/mm"
+        anchor_y = dist_h if dl.w_up_internal < 0 else -dist_h
+        entry = {"xy": (0.5 * (float(dl.x1_mm) + float(dl.x2_mm)), anchor_y), "text": label_text, "color": "red"}
+        if dl.w_up_internal < 0:
+            top_labels.append(entry)
+        else:
+            bottom_labels.append(entry)
+    for pf in data.point_forces:
+        label_text = f"{pf.label}={pf.value_user:g} kg"
+        anchor_y = arrow_h if pf.Fy_internal < 0 else -arrow_h
+        entry = {"xy": (float(pf.x_mm), anchor_y), "text": label_text, "color": "red"}
+        if pf.Fy_internal < 0:
+            top_labels.append(entry)
+        else:
+            bottom_labels.append(entry)
 
     # Cotas arriba
     for i, x in enumerate(targets["top"]):
@@ -454,6 +477,7 @@ def render_fbd(
             text=f"{_ceil_mm(dist)}",
             gap_obj_mm=float(gap_obj_mm),
             color="blue",
+            renderer=renderer,
         )
 
     # Cotas abajo
@@ -468,7 +492,11 @@ def render_fbd(
             text=f"{_ceil_mm(dist)}",
             gap_obj_mm=float(gap_obj_mm),
             color="blue",
+            renderer=renderer,
         )
+
+    _draw_stacked_side_labels(ax, top_labels, side="top")
+    _draw_stacked_side_labels(ax, bottom_labels, side="bottom")
 
     # -------------------------
     # Momentos (circular en px) - después de límites definitivos
@@ -481,15 +509,19 @@ def render_fbd(
         label = pm.label
         M_user = pm.M_user_kgmm
 
-        lx, ly = _draw_moment_px(ax, x, M, moment_r_px, style)
-        ax.text(
-            lx,
-            ly,
+        _draw_moment_px(ax, x, M, moment_r_px, style)
+        x_min, x_max = ax.get_xlim()
+        x_mid = 0.5 * (x_min + x_max)
+        if M >= 0.0:
+            prefer = ("NW", "NE", "SW", "SE") if x <= x_mid else ("NE", "NW", "SE", "SW")
+        else:
+            prefer = ("SW", "SE", "NW", "NE") if x <= x_mid else ("SE", "SW", "NE", "NW")
+        annotate_smart(
+            ax,
+            (x, 0.0),
             f"{label}={M_user:g} kg·mm",
-            ha="left",
-            va="bottom",
-            fontsize=style.font_size,
             color="red",
+            prefer=prefer,
         )
 
     # Formato

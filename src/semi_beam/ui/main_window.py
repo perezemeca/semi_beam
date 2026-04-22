@@ -11,20 +11,27 @@ from typing import List, Optional, Tuple, Dict, Any
 import matplotlib
 matplotlib.use("QtAgg")
 import matplotlib.pyplot as plt
+import numpy as np
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QWheelEvent, QIcon
+from PySide6.QtGui import QWheelEvent, QIcon, QColor, QBrush
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
     QLabel, QDoubleSpinBox, QPushButton, QTableWidget, QTableWidgetItem,
     QSizePolicy, QSplitter, QScrollArea, QTabWidget, QMessageBox, QFileDialog,
-    QToolButton, QFrame, QComboBox, QDialog
+    QToolButton, QFrame, QComboBox, QDialog, QCheckBox
 )
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 
 # Delegados numéricos (solo números / admite vacío)
-from semi_beam.ui.numeric_delegate import NullableFloatDelegate
-from semi_beam.ui.numeric_delegate import FlexibleDoubleSpinBox
+from semi_beam.ui.numeric_delegate import (
+    NullableFloatDelegate,
+    FlexibleDoubleSpinBox,
+    apply_table_readability_style,
+    TABLE_INPUT_BG,
+    TABLE_READONLY_BG,
+    TABLE_TEXT_COLOR,
+)
 
 # ---- Dominio / motor / view ----
 from semi_beam.domain.beam import Beam
@@ -38,8 +45,9 @@ from semi_beam.domain.supports import FixedSupport, TandemSupport, DirectionalSu
 from semi_beam.domain.unknowns import UnknownUniformLoad
 from semi_beam.domain.cases import BeamCase
 from semi_beam.engine.equilibrium import solve_equilibrium
+from semi_beam.engine.deflection import compute_total_deflection
 from semi_beam.engine.diagrams import build_V_M
-from semi_beam.view.renderer_vm import render_shear, render_moment
+from semi_beam.view.renderer_vm import render_shear, render_moment, render_deflection
 from semi_beam.services.memoria_calculo_pdf import (
     export_memoria_pdf, MemoriaHeader, MemoriaCaso, MemoriaResultados, MemoriaSeccion
 )
@@ -232,6 +240,7 @@ class SessionCache:
     dists: List[DistUniform]
     moms: List[PointMoment]
     note_text: str
+    deflection_supports: Optional[Tuple[float, float]] = None
     memoria_header: dict = field(default_factory=dict)
 
 
@@ -355,6 +364,7 @@ class UnitTab(QWidget):
         self.tbl_points = QTableWidget(0, 3)
         self.tbl_points.setHorizontalHeaderLabels(["label", "x_mm", "valor_kg"])
         self.tbl_points.horizontalHeader().setStretchLastSection(True)
+        apply_table_readability_style(self.tbl_points)
         p_v.addWidget(self.tbl_points)
 
         p_btns = QHBoxLayout()
@@ -379,6 +389,7 @@ class UnitTab(QWidget):
         self.tbl_dists = QTableWidget(0, 4)
         self.tbl_dists.setHorizontalHeaderLabels(["label", "x0_mm", "Lq_mm", "q_kg_per_mm"])
         self.tbl_dists.horizontalHeader().setStretchLastSection(True)
+        apply_table_readability_style(self.tbl_dists)
         q_v.addWidget(self.tbl_dists)
 
         q_btns = QHBoxLayout()
@@ -404,6 +415,7 @@ class UnitTab(QWidget):
         self.tbl_moms = QTableWidget(0, 3)
         self.tbl_moms.setHorizontalHeaderLabels(["label", "x_mm", "M_kgmm"])
         self.tbl_moms.horizontalHeader().setStretchLastSection(True)
+        apply_table_readability_style(self.tbl_moms)
         m_v.addWidget(self.tbl_moms)
 
         m_btns = QHBoxLayout()
@@ -427,6 +439,32 @@ class UnitTab(QWidget):
 
         self.section_panel = SectionCheckPanel()
         s_v.addWidget(self.section_panel)
+
+        # ==========================
+        # Collapsible: Deformada
+        # ==========================
+        d_box = CollapsibleBox("Deformada")
+        self._all_boxes.append(d_box)
+        root.addWidget(d_box)
+        d_v = d_box.content_layout()
+
+        defl_form_w = QWidget()
+        defl_form = QFormLayout(defl_form_w)
+        defl_form.setRowWrapPolicy(QFormLayout.WrapAllRows)
+        defl_form.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
+
+        self.chk_show_deflection = QCheckBox("Mostrar deformada")
+        self.chk_show_deflection.setChecked(True)
+        self.lbl_defl_e = QLabel("21000 kg/mm²")
+        self.lbl_defl_e.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
+        self.lbl_deflection = QLabel("Convexidad L/2: +30 mm\nvmin total: -\nUtilizado: - / 60 mm\nEstado: -")
+        self.lbl_deflection.setWordWrap(True)
+        self.lbl_deflection.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
+
+        defl_form.addRow(self.chk_show_deflection)
+        defl_form.addRow("E [kg/mm²]:", self.lbl_defl_e)
+        d_v.addWidget(defl_form_w)
+        d_v.addWidget(self.lbl_deflection)
 
         # ==========================
         # Collapsible: Notas
@@ -595,6 +633,15 @@ class UnitTab(QWidget):
         else:
             flags &= ~Qt.ItemIsEditable
         it.setFlags(flags)
+        self._style_table_item(tbl, r, c, editable=editable)
+
+    def _style_table_item(self, tbl: QTableWidget, r: int, c: int, *, editable: bool):
+        it = tbl.item(r, c)
+        if it is None:
+            return
+        bg = TABLE_INPUT_BG if editable else TABLE_READONLY_BG
+        it.setBackground(QBrush(QColor(bg)))
+        it.setForeground(QBrush(QColor(TABLE_TEXT_COLOR)))
 
     def _refresh_table_edit_locks(self, tbl: QTableWidget):
         was_blocked = tbl.blockSignals(True)
@@ -627,6 +674,7 @@ class UnitTab(QWidget):
         self._populate_configs()
         self._clear_motor_inputs()
         self.set_note("(sin notas)")
+        self.clear_deflection_summary()
         self.set_cache(None)
         self.set_diag(None)
 
@@ -851,12 +899,31 @@ class UnitTab(QWidget):
         if diag is None:
             self.section_panel.set_moment_provider(None)
             self.section_panel.clear_results_only(clear_moments_if_no_provider=True)
+            self.clear_deflection_summary()
         else:
             self.section_panel.set_moment_provider(lambda x_mm: float(diag.eval_M(float(x_mm))) / 10.0)
             self.section_panel.clear_results_only()
 
     def get_diag(self):
         return self._last_diag
+
+    def deflection_enabled(self) -> bool:
+        return bool(self.chk_show_deflection.isChecked())
+
+    def deflection_params(self) -> Optional[float]:
+        return 2.1e4
+
+    def set_deflection_summary(self, text: str, *, ok: Optional[bool] = None):
+        color = "#1F1F1F"
+        if ok is True:
+            color = "#0A7F2E"
+        elif ok is False:
+            color = "#B00020"
+        self.lbl_deflection.setStyleSheet(f"color: {color};")
+        self.lbl_deflection.setText(text)
+
+    def clear_deflection_summary(self, text: str = "Convexidad L/2: +30 mm\nvmin total: -\nUtilizado: - / 60 mm\nEstado: -"):
+        self.set_deflection_summary(text, ok=None)
 
 
 # ============================================================
@@ -896,7 +963,7 @@ class FBDApp(QMainWindow):
         self.tabs.addTab(self.tab_acoplado, "Acoplado")
         self.tabs.addTab(self.tab_semi, "Semirremolque")
         self.tabs.addTab(self.tab_bitren, "Bitren")
-        self.tabs.addTab(self.tab_reactions, "Semirremolque - Reacciones")
+        self.tabs.addTab(self.tab_reactions, "Calculo y verificación")
 
         left_lay.addWidget(self.tabs)
 
@@ -913,14 +980,15 @@ class FBDApp(QMainWindow):
         right.setContentsMargins(0, 0, 0, 0)
 
         self.fig = plt.Figure()
-        gs = self.fig.add_gridspec(3, 1, height_ratios=[1.35, 1.0, 1.0], hspace=0.60)
+        gs = self.fig.add_gridspec(4, 1, height_ratios=[1.35, 1.0, 1.0, 1.0], hspace=0.60)
         self.ax_fbd = self.fig.add_subplot(gs[0, 0])
         self.ax_V = self.fig.add_subplot(gs[1, 0], sharex=self.ax_fbd)
         self.ax_M = self.fig.add_subplot(gs[2, 0], sharex=self.ax_fbd)
+        self.ax_defl = self.fig.add_subplot(gs[3, 0], sharex=self.ax_fbd)
 
         self.canvas = FigureCanvas(self.fig)
         self.canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.canvas.setMinimumHeight(800)
+        self.canvas.setMinimumHeight(980)
 
         self.plot_scroll = QScrollArea()
         self.plot_scroll.setWidgetResizable(True)
@@ -928,7 +996,7 @@ class FBDApp(QMainWindow):
         self.plot_scroll.setWidget(self.canvas)
 
         btn_row = QHBoxLayout()
-        self.btn_export_plots = QPushButton("Exportar gráficos (FBD, V(x), M(x))")
+        self.btn_export_plots = QPushButton("Exportar gráficos (FBD, V(x), M(x), deformada)")
         self.btn_export_memoria = QPushButton("Exportar memoria de cálculo (PDF)")
         self.btn_export_memoria_docx = QPushButton("Exportar Memoria (DOCX)")
         btn_row.addWidget(self.btn_export_plots)
@@ -977,8 +1045,11 @@ class FBDApp(QMainWindow):
             tab.tbl_points.cellChanged.connect(lambda *_, t=tab: self._schedule_replot_tab(t, reset_solution=True))
             tab.tbl_dists.cellChanged.connect(lambda *_, t=tab: self._schedule_replot_tab(t, reset_solution=True))
             tab.tbl_moms.cellChanged.connect(lambda *_, t=tab: self._schedule_replot_tab(t, reset_solution=True))
+            tab.chk_show_deflection.toggled.connect(lambda *_, t=tab: self._schedule_replot_tab(t, reset_solution=False))
+            tab.section_panel.inertia_inputs_changed.connect(lambda t=tab: self._schedule_replot_tab(t, reset_solution=False))
 
-        self.tab_reactions.plot_data_changed.connect(self._replot_active_tab)
+        self.tab_reactions.plot_data_changed.connect(self._schedule_active_replot)
+        self.tab_reactions.section_panel.inertia_inputs_changed.connect(self._schedule_active_replot)
 
         self.tabs.currentChanged.connect(lambda _i: self._on_tab_changed())
         self.btn_export_plots.clicked.connect(self._export_plots_jpg_1200)
@@ -1006,6 +1077,9 @@ class FBDApp(QMainWindow):
         self.btn_export_memoria.setEnabled(not is_reactions)
         self.btn_export_memoria_docx.setEnabled(not is_reactions)
 
+    def _schedule_active_replot(self):
+        self._redraw_timer.start(60)
+
     def eventFilter(self, obj, event):
         if obj is self.canvas and isinstance(event, QWheelEvent):
             bar = self.plot_scroll.verticalScrollBar()
@@ -1014,12 +1088,12 @@ class FBDApp(QMainWindow):
         return super().eventFilter(obj, event)
 
     def _clear_plot_canvas(self, subtitle: str = ""):
-        for ax in (self.ax_fbd, self.ax_V, self.ax_M):
+        for ax in (self.ax_fbd, self.ax_V, self.ax_M, self.ax_defl):
             ax.clear()
             ax.set_axis_off()
         if subtitle:
             self.ax_fbd.text(0.5, 0.5, subtitle, ha="center", va="center", transform=self.ax_fbd.transAxes)
-        self.canvas.draw()
+        self.canvas.draw_idle()
 
     def _reset_tab(self, tab: UnitTab):
         tab.reset_tab_inputs()
@@ -1121,6 +1195,81 @@ class FBDApp(QMainWindow):
             "top_terms": top_terms,
         }
 
+    def _compute_deflection_result(
+        self,
+        *,
+        diag,
+        beam_L_mm: float,
+        supports: Optional[Tuple[float, float]],
+        params: Optional[float],
+        section_panel=None,
+    ):
+        if supports is None or params is None:
+            return None
+        xa, xb = float(supports[0]), float(supports[1])
+        if not xa < xb:
+            return None
+        x = np.linspace(0.0, float(beam_L_mm), 600, dtype=float)
+        if hasattr(diag, "_eval_M_array"):
+            M = diag._eval_M_array(x)
+        else:
+            M = np.asarray([float(diag.eval_M(float(xi))) for xi in x], dtype=float)
+        e_val = float(params)
+        i_input = None
+        i_source = ""
+        if section_panel is not None:
+            try:
+                i_profile = section_panel.build_inertia_profile_mm4(x)
+            except Exception:
+                i_profile = None
+            if i_profile is not None:
+                i_input = i_profile
+                i_source = "tabla de secciones"
+        if i_input is None:
+            return None
+        result = compute_total_deflection(x, M, E=e_val, I=i_input, supports=(xa, xb), camber_mid_mm=30.0)
+        return result, i_source
+
+    def _deflection_summary_text(self, result, i_source: str) -> str:
+        state = "OK" if result.ok else "EXCEDE"
+        return (
+            "Convexidad L/2: +30 mm\n"
+            f"I usado: {i_source}\n"
+            f"vmin total: {_fmt_plain(result.vmin_mm, 2)} mm @ x={_fmt_plain(result.x_vmin_mm, 0)} mm\n"
+            f"Utilizado: {_fmt_plain(result.utilized_mm, 2)} / {_fmt_plain(result.allowable_mm, 2)} mm\n"
+            f"Estado: {state}"
+        )
+
+    def _render_deflection_axis(
+        self,
+        *,
+        payload,
+        xlim: Tuple[float, float],
+        enabled: bool,
+        summary_target=None,
+        unavailable_text: str = "Deformada desactivada.",
+    ):
+        if not enabled:
+            self.ax_defl.clear()
+            self.ax_defl.set_axis_off()
+            self.ax_defl.text(0.5, 0.5, unavailable_text, ha="center", va="center", transform=self.ax_defl.transAxes)
+            if summary_target is not None:
+                summary_target.clear_deflection_summary("Convexidad L/2: +30 mm\nvmin total: -\nUtilizado: - / 60 mm\nEstado: desactivada")
+            return
+
+        if payload is None:
+            self.ax_defl.clear()
+            self.ax_defl.set_axis_off()
+            self.ax_defl.text(0.5, 0.5, "Deformada no disponible. Complete la tabla de secciones.", ha="center", va="center", transform=self.ax_defl.transAxes)
+            if summary_target is not None:
+                summary_target.clear_deflection_summary("Convexidad L/2: +30 mm\nvmin total: -\nUtilizado: - / 60 mm\nEstado: complete la tabla de secciones")
+            return
+
+        result, i_source = payload
+        render_deflection(self.ax_defl, result, y_zoom=1.0, xlim=xlim)
+        if summary_target is not None:
+            summary_target.set_deflection_summary(self._deflection_summary_text(result, i_source), ok=bool(result.ok))
+
     # Plotting
     def _plot_triplet(self, cache: SessionCache, *, set_diag_on_tab: Optional[UnitTab] = None):
         beam_plot, points, dists, moms = cache.beam_plot, cache.points, cache.dists, cache.moms
@@ -1147,8 +1296,32 @@ class FBDApp(QMainWindow):
         self.ax_M.set_xlabel("x [mm]")
         self.ax_M.tick_params(labelbottom=True)
 
+        defl_payload = None
+        if set_diag_on_tab is not None:
+            defl_payload = self._compute_deflection_result(
+                diag=diag,
+                beam_L_mm=beam_plot.L_mm,
+                supports=cache.deflection_supports,
+                params=set_diag_on_tab.deflection_params(),
+                section_panel=set_diag_on_tab.section_panel,
+            )
+            self._render_deflection_axis(
+                payload=defl_payload,
+                xlim=xlim,
+                enabled=set_diag_on_tab.deflection_enabled(),
+                summary_target=set_diag_on_tab,
+                unavailable_text="Deformada desactivada.",
+            )
+        else:
+            self._render_deflection_axis(
+                payload=None,
+                xlim=xlim,
+                enabled=False,
+                summary_target=None,
+            )
+
         self.fig.subplots_adjust(left=0.07, right=0.985, top=0.96, bottom=0.06, hspace=0.65)
-        self.canvas.draw()
+        self.canvas.draw_idle()
 
         if set_diag_on_tab is not None:
             set_diag_on_tab.set_diag(diag)
@@ -1156,7 +1329,8 @@ class FBDApp(QMainWindow):
     def _plot_reactions_tab(self, tab: SemiTrailerReactionsTab):
         state = tab.current_plot_state()
         if state is None:
-            self._clear_plot_canvas("Semirremolque - Reacciones: complete datos válidos para calcular.")
+            tab.set_diag(None)
+            self._clear_plot_canvas("Calculo y verificación: complete datos válidos para calcular.")
             return
 
         xlim = _compute_x_view(state.beam.L_mm, state.point_forces, state.dist_loads, state.moments)
@@ -1165,15 +1339,17 @@ class FBDApp(QMainWindow):
         self.ax_fbd.set_xlabel("x [mm]")
         self.ax_fbd.tick_params(labelbottom=True)
 
+        diag = build_V_M(
+            beam_L_mm=state.beam.L_mm,
+            point_forces=state.point_forces,
+            dist_loads=state.dist_loads,
+            moments=state.moments,
+            x_start=xlim[0],
+            x_end=xlim[1],
+        )
+        tab.set_diag(diag)
+
         if state.show_vm:
-            diag = build_V_M(
-                beam_L_mm=state.beam.L_mm,
-                point_forces=state.point_forces,
-                dist_loads=state.dist_loads,
-                moments=state.moments,
-                x_start=xlim[0],
-                x_end=xlim[1],
-            )
             render_shear(self.ax_V, diag, y_zoom=1.0, xlim=xlim)
             self.ax_V.set_xlabel("x [mm]")
             self.ax_V.tick_params(labelbottom=True)
@@ -1186,8 +1362,23 @@ class FBDApp(QMainWindow):
                 ax.set_axis_off()
                 ax.text(0.5, 0.5, title, ha="center", va="center", transform=ax.transAxes)
 
+        defl_payload = self._compute_deflection_result(
+            diag=diag,
+            beam_L_mm=state.beam.L_mm,
+            supports=tab.deflection_supports(),
+            params=tab.deflection_params(),
+            section_panel=tab.section_panel,
+        )
+        self._render_deflection_axis(
+            payload=defl_payload,
+            xlim=xlim,
+            enabled=tab.deflection_enabled(),
+            summary_target=tab,
+            unavailable_text="Deformada desactivada.",
+        )
+
         self.fig.subplots_adjust(left=0.07, right=0.985, top=0.96, bottom=0.06, hspace=0.65)
-        self.canvas.draw()
+        self.canvas.draw_idle()
 
     def _replot_active_tab(self):
         tab = self.active_tab()
@@ -1207,7 +1398,7 @@ class FBDApp(QMainWindow):
             if notes:
                 note += "\nNotas:\n- " + "\n- ".join(notes)
 
-            cache = SessionCache(beam_plot=beam, points=points, dists=dists, moms=moms, note_text=note)
+            cache = SessionCache(beam_plot=beam, points=points, dists=dists, moms=moms, note_text=note, deflection_supports=None)
             tab.set_cache(cache)
             tab.set_note(note)
             self._plot_triplet(cache, set_diag_on_tab=tab)
@@ -1217,6 +1408,7 @@ class FBDApp(QMainWindow):
             if msg.startswith("VALIDACION:"):
                 tab.set_cache(None)
                 tab.set_note(msg.replace("VALIDACION:", "").strip())
+                tab.set_diag(None)
                 if tab is self.active_tab():
                     self._clear_plot_canvas(msg.replace("VALIDACION:", "").strip())
                 return
@@ -1284,12 +1476,19 @@ class FBDApp(QMainWindow):
 
             beam_plot = Beam(L_mm=L_viga_total)
 
+            support_positions = [float(kingpin.x_mm), float(res.x_t_mm)]
+            if res.x_d_mm is not None:
+                support_positions.append(float(res.x_d_mm))
+            if x_rp2_abs is not None:
+                support_positions.append(float(x_rp2_abs))
+
             cache = SessionCache(
                 beam_plot=beam_plot,
                 points=res.solved_point_forces,
                 dists=res.solved_dist_loads,
                 moms=res.solved_moments,
                 note_text="",
+                deflection_supports=(min(support_positions), max(support_positions)),
             )
 
             xlim = _compute_x_view(beam_plot.L_mm, cache.points, cache.dists, cache.moms)

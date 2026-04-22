@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from PySide6.QtCore import Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QColor, QBrush
@@ -10,6 +10,8 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
+    QFrame,
+    QFormLayout,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
@@ -20,16 +22,87 @@ from PySide6.QtWidgets import (
     QSlider,
     QTableWidget,
     QTableWidgetItem,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
 from semi_beam.domain.beam import Beam
+from semi_beam.domain.labels import to_internal_Fy, to_internal_w_up
 from semi_beam.domain.loads import DistUniform, PointForce, PointMoment
 from semi_beam.engine.constraints import check_no_overlap, dist_interval
+from semi_beam.engine.diagrams import build_V_M
 from semi_beam.engine.optimizer_loads import OptimizerConfig, OptimizerSolution, search_configuration
 from semi_beam.engine.reactions import ReactionLoad, ReactionsResult, solve_reactions_2support, solve_reactions_3support
-from semi_beam.ui.numeric_delegate import NullableFloatDelegate, FlexibleDoubleSpinBox
+from semi_beam.ui.section_check_panel import SectionCheckPanel
+from semi_beam.ui.numeric_delegate import (
+    NullableFloatDelegate,
+    FlexibleDoubleSpinBox,
+    apply_table_readability_style,
+    combo_cell_style,
+    TABLE_ERROR_BG,
+    TABLE_INPUT_BG,
+    TABLE_READONLY_BG,
+    TABLE_TEXT_COLOR,
+)
+
+
+class CollapsibleBox(QWidget):
+    def __init__(self, title: str, parent=None):
+        super().__init__(parent)
+
+        self._btn = QToolButton()
+        self._btn.setText(title)
+        self._btn.setCheckable(True)
+        self._btn.setChecked(False)
+        self._btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self._btn.setArrowType(Qt.RightArrow)
+        self._btn.setStyleSheet(
+            """
+            QToolButton {
+                border: none;
+                background: transparent;
+                padding: 4px 6px;
+                text-align: left;
+                font-weight: 600;
+            }
+            QToolButton:checked { background: transparent; color: black; }
+            QToolButton:hover { background: rgba(0,0,0,0.04); }
+            QToolButton:pressed { background: rgba(0,0,0,0.06); }
+            QToolButton:focus { outline: none; }
+            """
+        )
+
+        self._content = QWidget()
+        self._content_layout = QVBoxLayout(self._content)
+        self._content_layout.setContentsMargins(6, 6, 6, 6)
+        self._content_layout.setSpacing(8)
+
+        self._line = QFrame()
+        self._line.setFrameShape(QFrame.HLine)
+        self._line.setFrameShadow(QFrame.Sunken)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(4)
+        lay.addWidget(self._btn)
+        lay.addWidget(self._line)
+        lay.addWidget(self._content)
+
+        self._content.setVisible(False)
+        self._line.setVisible(False)
+        self._btn.toggled.connect(self._on_toggled)
+
+    def content_layout(self) -> QVBoxLayout:
+        return self._content_layout
+
+    def set_collapsed(self, collapsed: bool):
+        self._btn.setChecked(not collapsed)
+
+    def _on_toggled(self, checked: bool):
+        self._content.setVisible(checked)
+        self._line.setVisible(checked)
+        self._btn.setArrowType(Qt.DownArrow if checked else Qt.RightArrow)
 
 
 def _set_item(tbl: QTableWidget, r: int, c: int, text: str):
@@ -60,6 +133,24 @@ def _fmt_plain(v: Optional[float], decimals: int = 2) -> str:
     if "." in s:
         s = s.rstrip("0").rstrip(".")
     return s
+
+
+def _compute_x_view(beam_L: float, points: List[PointForce], dists: List[DistUniform], moms: List[PointMoment]) -> Tuple[float, float]:
+    xs = [0.0, float(beam_L)]
+    for p in points:
+        xs.append(float(p.x_mm))
+    for m in moms:
+        xs.append(float(m.x_mm))
+    for d in dists:
+        x0 = float(d.x0_mm)
+        xs.append(x0)
+        xs.append(x0 + float(d.Lq_mm))
+
+    x_min = min(xs)
+    x_max = max(xs)
+    span = max(1.0, x_max - x_min)
+    margin = max(0.05 * span, 200.0)
+    return x_min - margin, x_max + margin
 
 
 @dataclass(frozen=True)
@@ -114,7 +205,9 @@ class SemiTrailerReactionsTab(QWidget):
         super().__init__(parent)
         self._plot_state: Optional[ReactionsPlotState] = None
         self._last_result: Optional[ReactionsResult] = None
+        self._last_diag = None
         self._search_worker: Optional[_SearchWorker] = None
+        self._all_boxes: List[CollapsibleBox] = []
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -207,6 +300,7 @@ class SemiTrailerReactionsTab(QWidget):
         self.tbl = QTableWidget(0, 4)
         self.tbl.setHorizontalHeaderLabels(["Tipo", "Magnitud", "Posición / centro [mm]", "Longitud [mm]"])
         self.tbl.horizontalHeader().setStretchLastSection(True)
+        apply_table_readability_style(self.tbl)
         self.tbl.setEditTriggers(
             QAbstractItemView.DoubleClicked
             | QAbstractItemView.EditKeyPressed
@@ -244,6 +338,22 @@ class SemiTrailerReactionsTab(QWidget):
         result_lay.addWidget(self.chk_show_vm)
         root.addWidget(result_box)
 
+        defl_box = QGroupBox("Deformada")
+        defl_lay = QVBoxLayout(defl_box)
+        defl_form = QFormLayout()
+        self.chk_show_deflection = QCheckBox("Mostrar deformada")
+        self.chk_show_deflection.setChecked(True)
+        self.lbl_defl_e = QLabel("21000 kg/mm²")
+        self.lbl_defl_e.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
+        self.lbl_deflection = QLabel("Convexidad L/2: +30 mm\nvmin total: -\nUtilizado: - / 60 mm\nEstado: -")
+        self.lbl_deflection.setWordWrap(True)
+        self.lbl_deflection.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
+        defl_form.addRow(self.chk_show_deflection)
+        defl_form.addRow("E [kg/mm²]:", self.lbl_defl_e)
+        defl_lay.addLayout(defl_form)
+        defl_lay.addWidget(self.lbl_deflection)
+        root.addWidget(defl_box)
+
         search_box = QGroupBox("Búsqueda")
         search_lay = QVBoxLayout(search_box)
         search_row = QHBoxLayout()
@@ -263,8 +373,16 @@ class SemiTrailerReactionsTab(QWidget):
         search_lay.addWidget(self.lbl_progress)
         root.addWidget(search_box)
 
-        notes_box = QGroupBox("Notas")
-        notes_lay = QVBoxLayout(notes_box)
+        section_box = CollapsibleBox("Verificación de sección a flexión")
+        self._all_boxes.append(section_box)
+        root.addWidget(section_box)
+        section_lay = section_box.content_layout()
+        self.section_panel = SectionCheckPanel()
+        section_lay.addWidget(self.section_panel)
+
+        notes_box = CollapsibleBox("Notas")
+        self._all_boxes.append(notes_box)
+        notes_lay = notes_box.content_layout()
         self.note_label = QLabel("(sin notas)")
         self.note_label.setWordWrap(True)
         self.note_label.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
@@ -280,6 +398,7 @@ class SemiTrailerReactionsTab(QWidget):
         self.offset.valueChanged.connect(self._sync_offset_slider)
         self.offset_slider.valueChanged.connect(self._sync_offset_spin)
         self.chk_show_vm.toggled.connect(lambda *_: self.plot_data_changed.emit())
+        self.chk_show_deflection.toggled.connect(lambda *_: self.plot_data_changed.emit())
         for sp in (
             self.L, self.x_a, self.x_b, self.x_k, self.x_t, self.x_t_min, self.x_t_max,
             self.limit_ra, self.limit_rb, self.limit_rk, self.limit_rd, self.limit_rt,
@@ -297,6 +416,8 @@ class SemiTrailerReactionsTab(QWidget):
         self._add_load_row(load_type="Puntual")
         self._add_load_row(load_type="Distribuida")
         self._on_mode_changed()
+        for box in self._all_boxes:
+            box.set_collapsed(True)
         self._schedule_recompute()
 
     def _make_spin(self, *, minv: float, maxv: float, decimals: int, step: float, value: float) -> FlexibleDoubleSpinBox:
@@ -312,6 +433,45 @@ class SemiTrailerReactionsTab(QWidget):
 
     def current_plot_state(self) -> Optional[ReactionsPlotState]:
         return self._plot_state
+
+    def deflection_enabled(self) -> bool:
+        return bool(self.chk_show_deflection.isChecked())
+
+    def deflection_params(self) -> Optional[float]:
+        return 2.1e4
+
+    def deflection_supports(self) -> Tuple[float, float]:
+        if self.mode.currentIndex() == 0:
+            return float(self.x_a.value()), float(self.x_b.value())
+        return float(self.x_k.value()), float(self.x_t.value())
+
+    def set_deflection_summary(self, text: str, *, ok: Optional[bool] = None):
+        color = "#1F1F1F"
+        if ok is True:
+            color = "#0A7F2E"
+        elif ok is False:
+            color = "#B00020"
+        self.lbl_deflection.setStyleSheet(f"color: {color};")
+        self.lbl_deflection.setText(text)
+
+    def clear_deflection_summary(self, text: str = "Convexidad L/2: +30 mm\nvmin total: -\nUtilizado: - / 60 mm\nEstado: -"):
+        self.set_deflection_summary(text, ok=None)
+
+    def set_note(self, text: str):
+        self.note_label.setText(text)
+
+    def set_diag(self, diag):
+        self._last_diag = diag
+        if diag is None:
+            self.section_panel.set_moment_provider(None)
+            self.section_panel.clear_results_only(clear_moments_if_no_provider=True)
+            self.clear_deflection_summary()
+        else:
+            self.section_panel.set_moment_provider(lambda x_mm: float(diag.eval_M(float(x_mm))) / 10.0)
+            self.section_panel.clear_results_only()
+
+    def get_diag(self):
+        return self._last_diag
 
     def _sync_offset_slider(self, value: float):
         iv = int(round(float(value)))
@@ -410,6 +570,25 @@ class SemiTrailerReactionsTab(QWidget):
             it.setFlags(flags | Qt.ItemIsEditable)
         else:
             it.setFlags(flags & ~Qt.ItemIsEditable)
+        self._apply_row_visual_state(row, has_error=False)
+
+    def _apply_row_visual_state(self, row: int, *, has_error: bool):
+        fg = QBrush(QColor(TABLE_TEXT_COLOR))
+        editable_bg = QBrush(QColor(TABLE_ERROR_BG if has_error else TABLE_INPUT_BG))
+        readonly_bg = QBrush(QColor(TABLE_ERROR_BG if has_error else TABLE_READONLY_BG))
+        for col in range(1, self.tbl.columnCount()):
+            it = self.tbl.item(row, col)
+            if it is None:
+                _set_item(self.tbl, row, col, "")
+                it = self.tbl.item(row, col)
+            if it is None:
+                continue
+            editable = bool(it.flags() & Qt.ItemIsEditable)
+            it.setBackground(editable_bg if editable else readonly_bg)
+            it.setForeground(fg)
+        combo = self.tbl.cellWidget(row, self.COL_TYPE)
+        if combo is not None:
+            combo.setStyleSheet(combo_cell_style(TABLE_ERROR_BG if has_error else TABLE_INPUT_BG))
 
     def _refresh_row_mode(self, row: int):
         load_type = self._type_combo(row).currentText()
@@ -435,6 +614,7 @@ class SemiTrailerReactionsTab(QWidget):
         cmb = QComboBox()
         cmb.addItems(self.LOAD_TYPES)
         cmb.setCurrentText(load_type if load_type in self.LOAD_TYPES else "Puntual")
+        cmb.setStyleSheet(combo_cell_style(TABLE_INPUT_BG))
         cmb.currentTextChanged.connect(lambda *_args, c=cmb: self._on_type_changed(c))
         self.tbl.setCellWidget(row, self.COL_TYPE, cmb)
         _set_item(self.tbl, row, self.COL_MAG, "")
@@ -450,17 +630,7 @@ class SemiTrailerReactionsTab(QWidget):
         self._schedule_recompute()
 
     def _row_error(self, row: int, has_error: bool):
-        brush = QBrush(QColor(255, 210, 210) if has_error else QColor(255, 255, 255))
-        for col in range(1, self.tbl.columnCount()):
-            it = self.tbl.item(row, col)
-            if it is None:
-                _set_item(self.tbl, row, col, "")
-                it = self.tbl.item(row, col)
-            if it is not None:
-                it.setBackground(brush)
-        combo = self.tbl.cellWidget(row, self.COL_TYPE)
-        if combo is not None:
-            combo.setStyleSheet("QComboBox { background-color: %s; }" % ("#FFD2D2" if has_error else "white"))
+        self._apply_row_visual_state(row, has_error=has_error)
 
     def _build_loads(self) -> Tuple[List[ReactionLoad], List[str], List[int]]:
         loads: List[ReactionLoad] = []
@@ -575,6 +745,149 @@ class SemiTrailerReactionsTab(QWidget):
                 errors.append("x_t actual debe quedar dentro de [x_t_min, x_t_max].")
         return errors
 
+    def _find_local_extrema_kgcm(self, diag, xlim: Tuple[float, float]):
+        import numpy as np
+
+        x, _, M = diag.sample(n_per_segment=220)
+        x = np.asarray(x, dtype=float)
+        M = np.asarray(M, dtype=float) / 10.0
+
+        mask = (x >= xlim[0]) & (x <= xlim[1])
+        x = x[mask]
+        M = M[mask]
+        if len(x) < 6:
+            return [], []
+
+        d = np.diff(M)
+        eps = 1e-8 * max(1.0, float(np.max(np.abs(M))))
+
+        s = np.sign(d)
+        for i in range(len(s)):
+            if abs(s[i]) < 1e-12:
+                s[i] = s[i - 1] if i > 0 else 0.0
+
+        maxs, mins = [], []
+        for i in range(1, len(s)):
+            if s[i - 1] > 0 and s[i] < 0 and abs(M[i]) > eps:
+                maxs.append((x[i], M[i]))
+            if s[i - 1] < 0 and s[i] > 0 and abs(M[i]) > eps:
+                mins.append((x[i], M[i]))
+
+        def dedup(lst, dx=10.0):
+            out = []
+            for xi, mi in lst:
+                if not out or abs(xi - out[-1][0]) > dx:
+                    out.append((xi, mi))
+            return out
+
+        return dedup(maxs), dedup(mins)
+
+    def _equilibrium_diagnostics(
+        self,
+        *,
+        point_forces: List[PointForce],
+        dist_loads: List[DistUniform],
+        moments: List[PointMoment],
+        residual_fy: float,
+        residual_m0: float,
+    ) -> Dict[str, Any]:
+        fy_terms: List[Tuple[str, float]] = []
+        m0_terms: List[Tuple[str, float]] = []
+
+        for pf in point_forces:
+            fy_i = float(to_internal_Fy(pf.label, pf.value_user))
+            fy_terms.append((pf.label, abs(fy_i)))
+            m0_terms.append((f"{pf.label}·x", abs(fy_i * float(pf.x_mm))))
+
+        for dl in dist_loads:
+            w_up = float(to_internal_w_up(dl.label, dl.q_user))
+            fres = w_up * float(dl.Lq_mm)
+            x_cent = float(dl.x0_mm) + 0.5 * float(dl.Lq_mm)
+            fy_terms.append((f"{dl.label} (res)", abs(fres)))
+            m0_terms.append((f"{dl.label} (res)·x", abs(fres * x_cent)))
+
+        for pm in moments:
+            m0_terms.append((pm.label, abs(float(pm.M_user_kgmm))))
+
+        ref_fy = max(sum(v for _, v in fy_terms), 1.0)
+        ref_m0 = max(sum(v for _, v in m0_terms), 1.0)
+        err_fy_pct = (abs(float(residual_fy)) / ref_fy) * 100.0
+        err_m0_pct = (abs(float(residual_m0)) / ref_m0) * 100.0
+        status = "OK" if max(err_fy_pct, err_m0_pct) <= 2.0 else "WARNING"
+        top_terms = sorted(m0_terms, key=lambda kv: kv[1], reverse=True)[:3]
+
+        return {
+            "status": status,
+            "ref_fy": ref_fy,
+            "ref_m0": ref_m0,
+            "err_fy_pct": err_fy_pct,
+            "err_m0_pct": err_m0_pct,
+            "top_terms": top_terms,
+        }
+
+    def _build_note_text(self, state: ReactionsPlotState, result: ReactionsResult) -> str:
+        xlim = _compute_x_view(state.beam.L_mm, state.point_forces, state.dist_loads, state.moments)
+        diag = build_V_M(
+            beam_L_mm=state.beam.L_mm,
+            point_forces=state.point_forces,
+            dist_loads=state.dist_loads,
+            moments=state.moments,
+            x_start=xlim[0],
+            x_end=xlim[1],
+        )
+        maxs, mins = self._find_local_extrema_kgcm(diag, xlim)
+        eq_diag = self._equilibrium_diagnostics(
+            point_forces=state.point_forces,
+            dist_loads=state.dist_loads,
+            moments=state.moments,
+            residual_fy=float(result.Fy_total_residual),
+            residual_m0=float(result.M0_residual),
+        )
+
+        note_lines = [
+            "[Calculo y verificación] Vista: solución (reacciones).",
+            f"Largo viga total = {_fmt_plain(state.beam.L_mm, 0)} mm",
+        ]
+        if self.mode.currentIndex() == 0:
+            note_lines.append(f"x_A = {_fmt_plain(self.x_a.value(), 0)} mm")
+            note_lines.append(f"x_B = {_fmt_plain(self.x_b.value(), 0)} mm")
+        else:
+            xd = float(self.x_t.value()) - float(self.offset.value())
+            note_lines.append(f"x_k = {_fmt_plain(self.x_k.value(), 0)} mm")
+            note_lines.append(f"x_d = {_fmt_plain(xd, 0)} mm")
+            note_lines.append(f"x_t = {_fmt_plain(self.x_t.value(), 0)} mm")
+
+        if maxs:
+            note_lines.append("Máximos locales M(x) [kg·cm]:")
+            for xi, mi in maxs:
+                note_lines.append(f"  x={_fmt_plain(xi, 0)} mm -> M={_fmt_plain(mi, 2)} kg·cm")
+        if mins:
+            note_lines.append("Mínimos locales M(x) [kg·cm]:")
+            for xi, mi in mins:
+                note_lines.append(f"  x={_fmt_plain(xi, 0)} mm -> M={_fmt_plain(mi, 2)} kg·cm")
+
+        note_lines.append(f"Residual ΣFy = {_fmt_plain(result.Fy_total_residual, 6)}")
+        note_lines.append(f"Residual ΣM0 = {_fmt_plain(result.M0_residual, 6)}")
+        note_lines.append(
+            f"Chequeo equilibrio (tol 2%): {eq_diag['status']} | "
+            f"err ΣFy={_fmt_plain(eq_diag['err_fy_pct'], 3)}% (ref={_fmt_plain(eq_diag['ref_fy'], 2)}), "
+            f"err ΣM0={_fmt_plain(eq_diag['err_m0_pct'], 3)}% (ref={_fmt_plain(eq_diag['ref_m0'], 2)})."
+        )
+        if eq_diag["status"] == "WARNING":
+            note_lines.append("Sugerencia: revisar signos de cargas y valores de reacciones.")
+            top_terms = eq_diag.get("top_terms", [])
+            if top_terms:
+                note_lines.append("Aportes dominantes (magnitud):")
+                for lbl, val in top_terms:
+                    note_lines.append(f"  {lbl}: {_fmt_plain(val, 2)}")
+
+        if result.notes:
+            note_lines.append("Notas:")
+            for n in result.notes:
+                note_lines.append(f"- {n}")
+
+        return "\n".join(note_lines)
+
     def recompute_now(self):
         if self.tbl.state() == QAbstractItemView.State.EditingState:
             self._timer.start(180)
@@ -585,6 +898,7 @@ class SemiTrailerReactionsTab(QWidget):
         if errors:
             self._plot_state = None
             self._last_result = None
+            self.set_diag(None)
             self.lbl_r1.setText("R_A: -")
             self.lbl_r2.setText("R_B: -")
             self.lbl_r3.setText("R_t: -")
@@ -613,6 +927,7 @@ class SemiTrailerReactionsTab(QWidget):
         except Exception as exc:
             self._plot_state = None
             self._last_result = None
+            self.set_diag(None)
             self.note_label.setText(f"Error: {exc}")
             self.plot_data_changed.emit()
             return
@@ -620,12 +935,7 @@ class SemiTrailerReactionsTab(QWidget):
         self._plot_state = state
         self._last_result = result
         self._update_result_labels(result)
-        note_lines = [
-            f"Residual ΣFy = {_fmt_plain(result.Fy_total_residual, 6)}",
-            f"Residual ΣM0 = {_fmt_plain(result.M0_residual, 6)}",
-        ]
-        note_lines.extend(result.notes)
-        self.note_label.setText("\n".join(note_lines))
+        self.note_label.setText(self._build_note_text(state, result))
         self.lbl_residuals.setText(
             f"Residuales: ΣFy={_fmt_plain(result.Fy_total_residual, 6)} | ΣM0={_fmt_plain(result.M0_residual, 6)}"
         )
@@ -674,8 +984,12 @@ class SemiTrailerReactionsTab(QWidget):
     def _set_result_style(self, lbl: QLabel, name: str, value: float, limit: float):
         pct = (float(value) / float(limit) * 100.0) if limit > 0.0 else 0.0
         exceeded = limit > 0.0 and value > limit + 1e-9
-        lbl.setText(f"{name}: {_fmt_plain(value, 2)} kg | {_fmt_plain(pct, 1)}% del límite")
-        lbl.setStyleSheet("font-size: 16px; font-weight: 600; color: %s;" % ("#B00020" if exceeded else "#1F1F1F"))
+        pct_color = "#B00020" if exceeded else "#0A7F2E"
+        lbl.setText(
+            f"{name}: {_fmt_plain(value, 2)} kg | "
+            f"<span style=\"color:{pct_color};\">{_fmt_plain(pct, 1)}% del límite</span>"
+        )
+        lbl.setStyleSheet("font-size: 16px; font-weight: 600; color: #1F1F1F;")
 
     def _update_result_labels(self, result: ReactionsResult):
         limits = self._current_limits()

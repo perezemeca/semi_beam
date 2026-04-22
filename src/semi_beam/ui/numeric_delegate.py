@@ -7,6 +7,82 @@ from PySide6.QtGui import QDoubleValidator, QValidator
 from PySide6.QtWidgets import QLineEdit, QStyledItemDelegate, QDoubleSpinBox
 
 
+TABLE_TEXT_COLOR = "#111111"
+TABLE_INPUT_BG = "#FFFFFF"
+TABLE_READONLY_BG = "#EEF2F6"
+TABLE_OK_BG = "#DFF3E4"
+TABLE_ERROR_BG = "#FFDCDC"
+TABLE_SELECTION_BG = "#2F6DB2"
+TABLE_SELECTION_TEXT = "#FFFFFF"
+TABLE_GRID_COLOR = "#C7CED6"
+TABLE_HEADER_BG = "#E8EDF3"
+
+
+def combo_cell_style(background: str = TABLE_INPUT_BG) -> str:
+    return (
+        "QComboBox {"
+        f"background-color: {background};"
+        f"color: {TABLE_TEXT_COLOR};"
+        f"selection-background-color: {TABLE_SELECTION_BG};"
+        f"selection-color: {TABLE_SELECTION_TEXT};"
+        "padding: 0 6px;"
+        "}"
+        "QComboBox QAbstractItemView {"
+        f"background-color: {TABLE_INPUT_BG};"
+        f"color: {TABLE_TEXT_COLOR};"
+        f"selection-background-color: {TABLE_SELECTION_BG};"
+        f"selection-color: {TABLE_SELECTION_TEXT};"
+        "}"
+    )
+
+
+def apply_table_readability_style(tbl) -> None:
+    tbl.setStyleSheet(
+        f"""
+        QTableWidget {{
+            background-color: {TABLE_INPUT_BG};
+            color: {TABLE_TEXT_COLOR};
+            gridline-color: {TABLE_GRID_COLOR};
+            selection-background-color: {TABLE_SELECTION_BG};
+            selection-color: {TABLE_SELECTION_TEXT};
+            alternate-background-color: #F8FAFC;
+        }}
+        QHeaderView::section {{
+            background-color: {TABLE_HEADER_BG};
+            color: {TABLE_TEXT_COLOR};
+            padding: 4px 6px;
+            border: 1px solid {TABLE_GRID_COLOR};
+            font-weight: 600;
+        }}
+        QTableWidget::item:selected {{
+            background-color: {TABLE_SELECTION_BG};
+            color: {TABLE_SELECTION_TEXT};
+        }}
+        QLineEdit, QAbstractSpinBox {{
+            background-color: {TABLE_INPUT_BG};
+            color: {TABLE_TEXT_COLOR};
+            selection-background-color: {TABLE_SELECTION_BG};
+            selection-color: {TABLE_SELECTION_TEXT};
+            border: 1px solid #7F8C9A;
+            padding: 0 4px;
+        }}
+        QComboBox {{
+            background-color: {TABLE_INPUT_BG};
+            color: {TABLE_TEXT_COLOR};
+            selection-background-color: {TABLE_SELECTION_BG};
+            selection-color: {TABLE_SELECTION_TEXT};
+            padding: 0 6px;
+        }}
+        QComboBox QAbstractItemView {{
+            background-color: {TABLE_INPUT_BG};
+            color: {TABLE_TEXT_COLOR};
+            selection-background-color: {TABLE_SELECTION_BG};
+            selection-color: {TABLE_SELECTION_TEXT};
+        }}
+        """
+    )
+
+
 class NullableFloatDelegate(QStyledItemDelegate):
     """
     Editor numérico que:
@@ -23,6 +99,16 @@ class NullableFloatDelegate(QStyledItemDelegate):
     def createEditor(self, parent, option, index):
         ed = QLineEdit(parent)
         ed.setAlignment(Qt.AlignCenter)
+        ed.setStyleSheet(
+            f"""
+            QLineEdit {{
+                background-color: {TABLE_INPUT_BG};
+                color: {TABLE_TEXT_COLOR};
+                selection-background-color: {TABLE_SELECTION_BG};
+                selection-color: {TABLE_SELECTION_TEXT};
+            }}
+            """
+        )
 
         val = QDoubleValidator(self.minv, self.maxv, self.decimals, ed)
         val.setNotation(QDoubleValidator.StandardNotation)  # sin científica
@@ -82,6 +168,16 @@ class SpinBoxDelegate(QStyledItemDelegate):
         sp.setSingleStep(self.step)
         sp.setKeyboardTracking(False)
         sp.setAlignment(Qt.AlignCenter)
+        sp.setStyleSheet(
+            f"""
+            QDoubleSpinBox {{
+                background-color: {TABLE_INPUT_BG};
+                color: {TABLE_TEXT_COLOR};
+                selection-background-color: {TABLE_SELECTION_BG};
+                selection-color: {TABLE_SELECTION_TEXT};
+            }}
+            """
+        )
         if self.blank_is_min:
             sp.setSpecialValueText("")  # si vale min -> se ve vacío
         return sp

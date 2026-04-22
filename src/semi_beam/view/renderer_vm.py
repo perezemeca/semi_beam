@@ -3,6 +3,8 @@ from __future__ import annotations
 from typing import Optional, Tuple, List, Set
 import numpy as np
 
+from semi_beam.view.label_placement import annotate_smart
+
 
 # -------------------------
 # Helpers formato
@@ -95,94 +97,68 @@ def _select_extrema_with_spacing(
     return picked
 
 
-def _annotate_moment_extrema(ax, x: np.ndarray, M_kgmm: np.ndarray):
+def _prefer_for_point(xi: float, yi: float, x_mid: float) -> tuple[str, ...]:
+    if yi >= 0.0:
+        return ("NE", "NW", "SE", "SW") if xi <= x_mid else ("NW", "NE", "SW", "SE")
+    return ("SE", "SW", "NE", "NW") if xi <= x_mid else ("SW", "SE", "NW", "NE")
+
+
+def _annotate_curve_extrema(
+    ax,
+    x: np.ndarray,
+    y: np.ndarray,
+    *,
+    label_scale: float,
+    label_suffix: str,
+    color: str,
+    include_locals: bool,
+    avoid_line=None,
+):
     """
-    Marca máximos/mínimos locales y anota valor en kg·cm.
-    - Máximo: label arriba
-    - Mínimo: label abajo
-    - Reubica labels dentro del recuadro
-    - Evita etiquetar M≈0 en tramos planos
+    Anota extremos relevantes de una curva usando el helper común.
     """
     if len(x) == 0:
         return
 
-    max_abs = float(np.max(np.abs(M_kgmm))) if len(M_kgmm) else 1.0
+    max_abs = float(np.max(np.abs(y))) if len(y) else 1.0
     max_abs = max(max_abs, 1.0)
-
-    # tolerancia de pendiente (para ignorar "ruido" y mesetas)
-    tol_slope = 1e-6 * max_abs  # ajustable: más grande => menos extremos
-
-    # candidatos locales
-    extrema = _find_local_extrema_indices(M_kgmm, tol_slope=tol_slope)
-
-    # agregamos extremos globales, pero NO queremos spam en 0:
-    i_max = int(np.argmax(M_kgmm))
-    i_min = int(np.argmin(M_kgmm))
-    extrema.extend([("max", i_max), ("min", i_min)])
-
-    # de-duplicar por índice
-    seen: Set[int] = set()
-    uniq: List[tuple[str, int]] = []
-    for kind, i in extrema:
-        if i in seen:
-            continue
-        seen.add(i)
-        uniq.append((kind, i))
-
-    # umbral mínimo para mostrar (evita marcar línea base)
-    y_abs_min = max(0.01 * max_abs, 1.0)  # 1% del máximo o 1 kg·mm
-
-    # separación mínima en x entre etiquetas
     x_min, x_max = ax.get_xlim()
     x_span = max(1.0, float(x_max - x_min))
-    min_dx = max(0.03 * x_span, 120.0)  # 3% del ancho o 120 mm
+    x_mid = 0.5 * (x_min + x_max)
 
-    picked = _select_extrema_with_spacing(
-        x, M_kgmm, uniq,
-        y_abs_min=y_abs_min,
-        min_dx=min_dx,
-    )
+    extrema: List[tuple[str, int]] = []
+    if include_locals:
+        tol_slope = 1e-6 * max_abs
+        extrema.extend(_find_local_extrema_indices(y, tol_slope=tol_slope))
+    extrema.extend([("max", int(np.argmax(y))), ("min", int(np.argmin(y)))])
+
+    seen: Set[int] = set()
+    uniq: List[tuple[str, int]] = []
+    for kind, idx in extrema:
+        if idx in seen:
+            continue
+        seen.add(idx)
+        uniq.append((kind, idx))
+
+    y_abs_min = max(0.01 * max_abs, 1.0)
+    min_dx = max(0.03 * x_span, 120.0)
+    picked = _select_extrema_with_spacing(x, y, uniq, y_abs_min=y_abs_min, min_dx=min_dx)
 
     if not picked:
         return
 
-    # márgenes internos para que el texto no “se salga”
-    y_min, y_max = ax.get_ylim()
-    y_span = max(1.0, float(y_max - y_min))
-        # Margen fijo para que las etiquetas no toquen el borde (X e Y)
-    mx = 0.03 * x_span
-    my = 0.06 * y_span
-
     for kind, i in picked:
         xi = float(x[i])
-        Mi = float(M_kgmm[i])
-        Mi_kgcm = Mi / 10.0
-
-        # marcador pequeño
-        ax.scatter([xi], [Mi], s=18, zorder=6)
-
-        # posición preferida del texto
-        if kind == "max":
-            tx, ty = xi, Mi + my
-            va = "bottom"
-        else:
-            tx, ty = xi, Mi - my
-            va = "top"
-
-        # clamp a la caja del gráfico
-        tx = _clamp(tx, x_min + mx, x_max - mx)
-        ty = _clamp(ty, y_min + my, y_max - my)
-        if ty >= (y_max - 1.15 * my):
-            ty = y_max - my
-            va = "top"
-        elif ty <= (y_min + 1.15 * my):
-            ty = y_min + my
-            va = "bottom"
-
-        ax.text(
-            tx, ty,
-            f"{_fmt_plain(Mi_kgcm, 2)} kg·cm",
-            ha="center", va=va, fontsize=8, zorder=7, clip_on=True
+        yi = float(y[i])
+        ax.scatter([xi], [yi], s=18, zorder=6, color=color)
+        prefer = _prefer_for_point(xi, yi, x_mid)
+        annotate_smart(
+            ax,
+            (xi, yi),
+            f"{_fmt_plain(yi / label_scale, 2)} {label_suffix}",
+            color=color,
+            prefer=prefer,
+            avoid_line=avoid_line,
         )
 
 
@@ -191,9 +167,10 @@ def _annotate_moment_extrema(ax, x: np.ndarray, M_kgmm: np.ndarray):
 # -------------------------
 def render_shear(ax, diag, y_zoom: float = 1.0, xlim: Optional[Tuple[float, float]] = None):
     ax.clear()
+    ax._smart_label_bboxes = []
     x, V, _ = diag.sample(n_per_segment=80)
 
-    ax.plot(x, V)
+    line = ax.plot(x, V, color="#1C4E80")[0]
     ax.axhline(0.0, linewidth=1.0)
 
     if xlim is None:
@@ -205,6 +182,16 @@ def render_shear(ax, diag, y_zoom: float = 1.0, xlim: Optional[Tuple[float, floa
     vmax = max(vmax, 1.0)
     pad = 1.15
     ax.set_ylim(-vmax * y_zoom * pad, vmax * y_zoom * pad)
+    _annotate_curve_extrema(
+        ax,
+        np.asarray(x, dtype=float),
+        np.asarray(V, dtype=float),
+        label_scale=1.0,
+        label_suffix="kg",
+        color="#1C4E80",
+        include_locals=False,
+        avoid_line=line,
+    )
 
     ax.set_ylabel("V [kg]")
     ax.set_title("Diagrama de Corte V(x)")
@@ -213,9 +200,10 @@ def render_shear(ax, diag, y_zoom: float = 1.0, xlim: Optional[Tuple[float, floa
 
 def render_moment(ax, diag, y_zoom: float = 1.0, xlim: Optional[Tuple[float, float]] = None):
     ax.clear()
+    ax._smart_label_bboxes = []
     x, _, M = diag.sample(n_per_segment=80)
 
-    ax.plot(x, M)
+    line = ax.plot(x, M, color="#2B2D42")[0]
     ax.axhline(0.0, linewidth=1.0)
 
     if xlim is None:
@@ -229,9 +217,58 @@ def render_moment(ax, diag, y_zoom: float = 1.0, xlim: Optional[Tuple[float, flo
     ax.set_ylim(-mmax * y_zoom * pad, mmax * y_zoom * pad)
 
     # ✅ extremos (filtrados y sin spam en M=0)
-    _annotate_moment_extrema(ax, np.asarray(x, dtype=float), np.asarray(M, dtype=float))
+    _annotate_curve_extrema(
+        ax,
+        np.asarray(x, dtype=float),
+        np.asarray(M, dtype=float),
+        label_scale=10.0,
+        label_suffix="kg·cm",
+        color="#2B2D42",
+        include_locals=True,
+        avoid_line=line,
+    )
 
     ax.set_ylabel("M [kg·mm]")
     ax.set_xlabel("x [mm]")
     ax.set_title("Diagrama de Momento Flector M(x)")
     ax.grid(True, alpha=0.25)
+
+
+def render_deflection(ax, result, y_zoom: float = 1.0, xlim: Optional[Tuple[float, float]] = None):
+    ax.clear()
+    ax._smart_label_bboxes = []
+    x = np.asarray(result.x_mm, dtype=float)
+    v_total = np.asarray(result.v_total_mm, dtype=float)
+    v_pre = np.asarray(result.v_precamber_mm, dtype=float)
+
+    line = ax.plot(x, v_total, label="v_total(x)", color="#145DA0", linewidth=1.8)[0]
+    ax.plot(x, v_pre, label="Convexidad inicial", color="#7AA6D1", linewidth=1.1, linestyle="--")
+    ax.axhline(0.0, linewidth=1.0, color="#555555")
+    ax.axhline(float(result.limit_y_mm), linewidth=1.1, color="#B00020", linestyle="--", label="Límite")
+
+    ax.scatter([float(result.x_vmin_mm)], [float(result.vmin_mm)], color="#B00020", s=24, zorder=6)
+    if xlim is None:
+        ax.set_xlim(float(x[0]), float(x[-1]))
+    else:
+        ax.set_xlim(xlim[0], xlim[1])
+
+    vmax = float(np.max(np.abs(np.concatenate([v_total, v_pre, np.asarray([result.limit_y_mm], dtype=float)])))) if len(x) else 1.0
+    vmax = max(vmax, 1.0)
+    pad = 1.20
+    ax.set_ylim(-vmax * y_zoom * pad, vmax * y_zoom * pad)
+    x_min, x_max = ax.get_xlim()
+    x_mid = 0.5 * (x_min + x_max)
+    prefer = _prefer_for_point(float(result.x_vmin_mm), float(result.vmin_mm), x_mid)
+    annotate_smart(
+        ax,
+        (float(result.x_vmin_mm), float(result.vmin_mm)),
+        f"vmin={_fmt_plain(float(result.vmin_mm), 2)} mm @ x={_fmt_plain(float(result.x_vmin_mm), 0)} mm",
+        color="#B00020",
+        prefer=prefer,
+        avoid_line=line,
+    )
+    ax.set_ylabel("v [mm]")
+    ax.set_xlabel("x [mm]")
+    ax.set_title("Deformada Total v(x)")
+    ax.grid(True, alpha=0.25)
+    ax.legend(loc="best", fontsize=8, framealpha=0.9)
