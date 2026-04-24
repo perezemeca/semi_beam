@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from typing import Callable, Optional, List
+import math
+import os
+import tempfile
+from typing import Any, Callable, Dict, Optional, List
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QBrush
@@ -18,6 +21,11 @@ from matplotlib.patches import FancyArrowPatch
 
 from semi_beam.sections.i_section import ISection, IN_TO_MM
 from semi_beam.sections.flex_check import compute_flex_row
+from semi_beam.services.memoria_calculo_docx import (
+    MemoriaHeader,
+    MemoriaSeccion,
+    export_memoria_docx,
+)
 from semi_beam.ui.numeric_delegate import (
     NullableFloatDelegate,
     SpinBoxDelegate,
@@ -31,6 +39,15 @@ from semi_beam.ui.numeric_delegate import (
 )
 
 from semi_beam.materials.material_db import MaterialDB, default_materials_path
+
+
+DOCX_A4_WIDTH_MM = 210.0
+DOCX_A4_HEIGHT_MM = 297.0
+DOCX_MARGIN_MM = 25.4
+DOCX_USABLE_WIDTH_MM = DOCX_A4_WIDTH_MM - (2.0 * DOCX_MARGIN_MM)
+DOCX_CARD_COLUMNS = 2
+DOCX_CARD_CELL_WIDTH_MM = DOCX_USABLE_WIDTH_MM / DOCX_CARD_COLUMNS
+DOCX_CARD_IMAGE_WIDTH_MM = 62.0
 
 
 def _in_to_mm(v_in: float) -> float:
@@ -129,12 +146,15 @@ class SectionCheckPanel(QWidget):
     COL_WREQ = 10
     COL_SIGMAX = 11
 
-    TWEB_OPTIONS = ["3/16", "1/4", "5/16", "3/8", "1/2", "5/8"]
+    TFLANGE_OPTIONS = ["5/16", "3/8", "7/16", "1/2", "5/8", "3/4"]
+    TWEB_OPTIONS = ["3/16", "1/4", "5/16", "3/8", "7/16", "1/2", "5/8"]
 
     def __init__(self, parent=None):
         super().__init__(parent)
 
         self._moment_provider: Optional[Callable[[float], float]] = None
+        self._shear_provider: Optional[Callable[[float], float]] = None
+        self._deflection_context: Optional[Dict[str, Any]] = None
         self.n_beams = 2
 
         self.mat_db: Optional[MaterialDB] = None
@@ -150,8 +170,8 @@ class SectionCheckPanel(QWidget):
 
         self.cmb_t_top = QComboBox()
         self.cmb_t_bot = QComboBox()
-        self._populate_thickness_combo(self.cmb_t_top, ["1/2", "5/8", "3/4"], default="1/2")
-        self._populate_thickness_combo(self.cmb_t_bot, ["1/2", "5/8", "3/4"], default="1/2")
+        self._populate_thickness_combo(self.cmb_t_top, self.TFLANGE_OPTIONS, default="1/2")
+        self._populate_thickness_combo(self.cmb_t_bot, self.TFLANGE_OPTIONS, default="1/2")
         _configure_combo_for_contents(self.cmb_t_top)
         _configure_combo_for_contents(self.cmb_t_bot)
 
@@ -357,6 +377,24 @@ class SectionCheckPanel(QWidget):
             self._auto_fill_M_for_row(r)
         self._schedule_recompute()
 
+    def set_shear_provider(self, fn: Optional[Callable[[float], float]]):
+        self._shear_provider = fn
+
+    def set_deflection_context(self, result: Optional[Any], *, i_source: str = ""):
+        if result is None:
+            self._deflection_context = None
+            return
+        self._deflection_context = {
+            "vmin_mm": float(result.vmin_mm),
+            "x_vmin_mm": float(result.x_vmin_mm),
+            "utilized_mm": float(result.utilized_mm),
+            "allowable_mm": float(result.allowable_mm),
+            "limit_y_mm": float(result.limit_y_mm),
+            "camber_mid_mm": float(result.camber_mid_mm),
+            "ok": bool(result.ok),
+            "i_source": str(i_source or ""),
+        }
+
     def clear_results_only(self, *, clear_moments_if_no_provider: bool = False):
         self.tbl.blockSignals(True)
         for r in range(self.tbl.rowCount()):
@@ -370,20 +408,27 @@ class SectionCheckPanel(QWidget):
         self.tbl.blockSignals(False)
 
     # -------- Preview ----------
-    def _draw_dim_v(self, y1: float, y2: float, x_dim: float, x_obj: float, text: str, *, color="blue"):
-        self.ax.plot([x_obj, x_dim], [y1, y1], color=color, linewidth=1.0)
-        self.ax.plot([x_obj, x_dim], [y2, y2], color=color, linewidth=1.0)
+    def _draw_dim_v_on(self, ax, y1: float, y2: float, x_dim: float, x_obj: float, text: str, *, color="blue"):
+        ax.plot([x_obj, x_dim], [y1, y1], color=color, linewidth=1.0)
+        ax.plot([x_obj, x_dim], [y2, y2], color=color, linewidth=1.0)
 
         arr = FancyArrowPatch((x_dim, y1), (x_dim, y2),
                               arrowstyle="<->", mutation_scale=12,
                               linewidth=1.0, color=color)
         arr.set_fill(False)
-        self.ax.add_patch(arr)
+        ax.add_patch(arr)
 
         ym = 0.5 * (y1 + y2)
-        self.ax.text(x_dim, ym, text,
-                     ha="center", va="center", fontsize=10, color=color,
-                     bbox=dict(facecolor="white", edgecolor="none", pad=1.2))
+        ax.text(
+            x_dim,
+            ym,
+            text,
+            ha="center",
+            va="center",
+            fontsize=10,
+            color=color,
+            bbox=dict(facecolor="white", edgecolor="none", pad=1.2),
+        )
 
     def _make_section(self, h_web_mm: float, t_web_in: float) -> ISection:
         b_f_in = 5.0
@@ -397,8 +442,7 @@ class SectionCheckPanel(QWidget):
             t_web_mm=_in_to_mm(float(t_web_in)),
         )
 
-    def _repaint_preview(self, *, h_web_override_mm: float, t_web_in: float):
-        sec = self._make_section(h_web_override_mm, t_web_in)
+    def _draw_section_preview_on(self, ax, sec: ISection):
         p = sec.props_mm()
 
         H = float(p.get("H_mm", 0.0))
@@ -408,27 +452,31 @@ class SectionCheckPanel(QWidget):
         h = float(sec.h_web_mm)
         tw = float(sec.t_web_mm)
 
-        self.ax.clear()
-        self.ax.add_patch(plt.Rectangle((0.0, 0.0), b, t_bot, fill=False, edgecolor="blue", linewidth=1.2))
-        self.ax.add_patch(plt.Rectangle((b/2 - tw/2, t_bot), tw, h, fill=False, edgecolor="blue", linewidth=1.2))
-        self.ax.add_patch(plt.Rectangle((0.0, t_bot + h), b, t_top, fill=False, edgecolor="blue", linewidth=1.2))
+        ax.clear()
+        ax.add_patch(plt.Rectangle((0.0, 0.0), b, t_bot, fill=False, edgecolor="blue", linewidth=1.2))
+        ax.add_patch(plt.Rectangle((b / 2 - tw / 2, t_bot), tw, h, fill=False, edgecolor="blue", linewidth=1.2))
+        ax.add_patch(plt.Rectangle((0.0, t_bot + h), b, t_top, fill=False, edgecolor="blue", linewidth=1.2))
 
         x_obj_L = 0.0
         x_dim_H = -0.35 * b
-        self._draw_dim_v(0.0, H, x_dim_H, x_obj_L, _fmt_int(H), color="blue")
+        self._draw_dim_v_on(ax, 0.0, H, x_dim_H, x_obj_L, _fmt_int(H), color="blue")
 
         x_obj_R = b
         x_dim_h = b + 0.22 * b
-        self._draw_dim_v(t_bot, t_bot + h, x_dim_h, x_obj_R, _fmt_int(h), color="blue")
+        self._draw_dim_v_on(ax, t_bot, t_bot + h, x_dim_h, x_obj_R, _fmt_int(h), color="blue")
 
-        self.ax.set_aspect("equal", adjustable="box")
-        self.ax.axis("off")
+        ax.set_aspect("equal", adjustable="box")
+        ax.axis("off")
 
         xpad = 0.95 * b
         ypad_top = 0.35 * max(H, 1.0)
         ypad_bot = 0.25 * max(H, 1.0)
-        self.ax.set_xlim(-xpad, b + xpad)
-        self.ax.set_ylim(-ypad_bot, max(H, 1.0) + ypad_top)
+        ax.set_xlim(-xpad, b + xpad)
+        ax.set_ylim(-ypad_bot, max(H, 1.0) + ypad_top)
+
+    def _repaint_preview(self, *, h_web_override_mm: float, t_web_in: float):
+        sec = self._make_section(h_web_override_mm, t_web_in)
+        self._draw_section_preview_on(self.ax, sec)
         self.canvas.draw()
 
     def _repaint_preview_from_selection(self):
@@ -668,6 +716,276 @@ class SectionCheckPanel(QWidget):
         except Exception as e:
             raise RuntimeError(f"No se pudo exportar tabla de sección a JPG: {e}")
 
+    def _collect_table_export_data(self) -> tuple[list[str], list[list[str]], list[bool]]:
+        headers = [self.tbl.horizontalHeaderItem(c).text() for c in range(self.tbl.columnCount())]
+        data: list[list[str]] = []
+        row_ok: list[bool] = []
+        nmin = float(self.n_min.value())
+
+        for r in range(self.tbl.rowCount()):
+            row = []
+            for c in range(self.tbl.columnCount()):
+                if c == self.COL_TWEB:
+                    row.append(self._tweb_widgets[r].currentText() if r < len(self._tweb_widgets) else _get_text(self.tbl, r, c))
+                else:
+                    row.append(_get_text(self.tbl, r, c))
+            data.append(row)
+
+            fs = _try_float(_get_text(self.tbl, r, self.COL_FS))
+            row_ok.append(bool(fs is not None and fs >= nmin))
+
+        return headers, data, row_ok
+
+    def _collect_section_export_cards(self) -> list[dict[str, Any]]:
+        cards: list[dict[str, Any]] = []
+        nmin = float(self.n_min.value())
+        sigma_top_adm = self._mat_sigma(self._current_material_id(self.cmb_mat_top))
+        sigma_bot_adm = self._mat_sigma(self._current_material_id(self.cmb_mat_bot))
+        sigma_web_adm = self._mat_sigma(self._current_material_id(self.cmb_mat_web))
+        t_top_in = _parse_frac_in(self._current_thickness_in(self.cmb_t_top))
+        t_bot_in = _parse_frac_in(self._current_thickness_in(self.cmb_t_bot))
+        for r in range(self.tbl.rowCount()):
+            hweb = _try_float(_get_text(self.tbl, r, self.COL_HWEB))
+            if hweb is None or hweb <= 0.0:
+                continue
+            try:
+                tweb_in = _parse_frac_in(self._current_tweb_in(r))
+                sec = self._make_section(hweb, tweb_in)
+                props = sec.props_mm()
+            except Exception:
+                continue
+
+            fs_text = _get_text(self.tbl, r, self.COL_FS)
+            fs_value = _try_float(fs_text)
+            M_value = _try_float(_get_text(self.tbl, r, self.COL_M))
+            x_value = _try_float(_get_text(self.tbl, r, self.COL_X))
+            V_value = None
+            if self._shear_provider is not None and x_value is not None:
+                try:
+                    V_value = float(self._shear_provider(float(x_value)))
+                except Exception:
+                    V_value = None
+
+            res = None
+            if M_value is not None and sigma_top_adm is not None and sigma_bot_adm is not None:
+                try:
+                    res = compute_flex_row(
+                        section=sec,
+                        M_kgcm=M_value,
+                        sigma_adm_kgcm2=float(min(sigma_top_adm, sigma_bot_adm)),
+                        sigma_adm_top_kgcm2=float(sigma_top_adm),
+                        sigma_adm_bot_kgcm2=float(sigma_bot_adm),
+                        n_beams=self.n_beams,
+                        round_up_decimals=4,
+                    )
+                except Exception:
+                    res = None
+
+            ix_single_cm4 = float(props["Ix_mm4"]) / (10.0 ** 4)
+            ix_total_cm4 = ix_single_cm4 * float(self.n_beams)
+            h_total_mm = float(props["H_mm"])
+            ybar_cm = float(props["ybar_mm"]) / 10.0
+            c_top_cm = float(props["c_top_mm"]) / 10.0
+            c_bot_cm = float(props["c_bot_mm"]) / 10.0
+            cmax_cm = float(props["c_max_mm"]) / 10.0
+            wcrit_cm3 = ix_total_cm4 / max(cmax_cm, 1e-12)
+            sigma_top = (abs(M_value) * c_top_cm / max(ix_total_cm4, 1e-12)) if M_value is not None else None
+            sigma_bot = (abs(M_value) * c_bot_cm / max(ix_total_cm4, 1e-12)) if M_value is not None else None
+            wreq_top = (abs(M_value) / max(float(sigma_top_adm), 1e-12)) if (M_value is not None and sigma_top_adm is not None) else None
+            wreq_bot = (abs(M_value) / max(float(sigma_bot_adm), 1e-12)) if (M_value is not None and sigma_bot_adm is not None) else None
+            fs_top = (float(sigma_top_adm) / max(sigma_top, 1e-12)) if (sigma_top_adm is not None and sigma_top is not None) else None
+            fs_bot = (float(sigma_bot_adm) / max(sigma_bot, 1e-12)) if (sigma_bot_adm is not None and sigma_bot is not None) else None
+            shear = self._compute_shear_check_data(sec, V_value, sigma_web_adm)
+            cards.append(
+                {
+                    "sec": _get_text(self.tbl, r, self.COL_SEC) or str(r + 1),
+                    "x_mm": _get_text(self.tbl, r, self.COL_X),
+                    "h_web_mm": float(hweb),
+                    "t_web_in": self._current_tweb_in(r),
+                    "fs_text": fs_text or "-",
+                    "ok": fs_value is not None and fs_value >= nmin,
+                    "section": sec,
+                    "moment_kgcm": M_value,
+                    "sigma_top_adm_kgcm2": sigma_top_adm,
+                    "sigma_bot_adm_kgcm2": sigma_bot_adm,
+                    "sigma_web_adm_kgcm2": sigma_web_adm,
+                    "t_top_in": t_top_in,
+                    "t_bot_in": t_bot_in,
+                    "t_top_mm": float(sec.t_top_mm),
+                    "t_bot_mm": float(sec.t_bot_mm),
+                    "t_web_mm": float(sec.t_web_mm),
+                    "b_f_mm": float(sec.b_f_mm),
+                    "h_total_mm": h_total_mm,
+                    "ix_single_cm4": ix_single_cm4,
+                    "ix_total_cm4": ix_total_cm4,
+                    "ybar_cm": ybar_cm,
+                    "c_top_cm": c_top_cm,
+                    "c_bot_cm": c_bot_cm,
+                    "cmax_cm": cmax_cm,
+                    "wcrit_cm3": wcrit_cm3,
+                    "wreq_top_cm3": wreq_top,
+                    "wreq_bot_cm3": wreq_bot,
+                    "sigma_top_kgcm2": sigma_top,
+                    "sigma_bot_kgcm2": sigma_bot,
+                    "fs_top": fs_top,
+                    "fs_bot": fs_bot,
+                    "result": res,
+                    "shear": shear,
+                }
+            )
+        return cards
+
+    def _render_section_report_image(self, sec: ISection, path: str, *, dpi: int) -> None:
+        width_mm = 68.0
+        height_mm = 58.0
+        fig = plt.Figure(figsize=(width_mm / 25.4, height_mm / 25.4), dpi=160)
+        ax = fig.add_subplot(111)
+        self._draw_section_preview_on(ax, sec)
+        fig.subplots_adjust(left=0.06, right=0.94, top=0.94, bottom=0.06)
+        fig.savefig(path, format="png", dpi=int(max(120, dpi)), facecolor="white")
+        plt.close(fig)
+
+    def _build_section_report_title(self, card: dict[str, Any]) -> str:
+        x_text = card["x_mm"] or "-"
+        return (
+            f"Seccion {card['sec']} | x = {x_text} mm\n"
+            f"h_viga = {_fmt_int(card['h_web_mm'])} mm | tw = {card['t_web_in']} in | FS = {card['fs_text']}"
+        )
+
+    def _compute_shear_check_data(self, sec: ISection, v_kg: Optional[float], sigma_web_adm_kgcm2: Optional[float]) -> Dict[str, Any]:
+        props = sec.props_mm()
+        ybar_mm = float(props["ybar_mm"])
+        h_total_mm = float(props["H_mm"])
+        layers = [
+            (0.0, float(sec.t_bot_mm), float(sec.b_f_mm)),
+            (float(sec.t_bot_mm), float(sec.t_bot_mm + sec.h_web_mm), float(sec.t_web_mm)),
+            (float(sec.t_bot_mm + sec.h_web_mm), h_total_mm, float(sec.b_f_mm)),
+        ]
+
+        q_mm3 = 0.0
+        for y0, y1, width_mm in layers:
+            ya = max(ybar_mm, y0)
+            yb = min(h_total_mm, y1)
+            if yb <= ya:
+                continue
+            area_mm2 = width_mm * (yb - ya)
+            y_centroid_mm = 0.5 * (ya + yb)
+            q_mm3 += area_mm2 * (y_centroid_mm - ybar_mm)
+
+        ix_total_cm4 = (float(props["Ix_mm4"]) * float(self.n_beams)) / (10.0 ** 4)
+        q_cm3 = q_mm3 / (10.0 ** 3)
+        if ybar_mm <= float(sec.t_bot_mm) + 1e-9:
+            t_na_mm = float(sec.b_f_mm)
+            zone = "ala inferior"
+        elif ybar_mm >= float(sec.t_bot_mm + sec.h_web_mm) - 1e-9:
+            t_na_mm = float(sec.b_f_mm)
+            zone = "ala superior"
+        else:
+            t_na_mm = float(sec.t_web_mm)
+            zone = "alma"
+        t_na_cm = t_na_mm / 10.0
+
+        tau_max = None
+        if v_kg is not None:
+            tau_max = abs(float(v_kg)) * q_cm3 / max(ix_total_cm4 * t_na_cm, 1e-12)
+
+        tau_adm = None if sigma_web_adm_kgcm2 is None else float(sigma_web_adm_kgcm2) / math.sqrt(3.0)
+        fs_shear = None
+        if tau_max is not None and tau_adm is not None:
+            fs_shear = tau_adm / max(tau_max, 1e-12)
+
+        return {
+            "V_kg": v_kg,
+            "Q_cm3": q_cm3,
+            "t_na_cm": t_na_cm,
+            "zone": zone,
+            "tau_max_kgcm2": tau_max,
+            "tau_adm_kgcm2": tau_adm,
+            "fs_shear": fs_shear,
+        }
+
+    def build_verification_export_payload(self, tmpdir: str, *, dpi: int = 300) -> Dict[str, Any]:
+        """Arma datos del verificador para el pipeline único de memoria_calculo_docx."""
+        self.tbl.clearFocus()
+        self._recompute_all()
+
+        headers, data, row_ok = self._collect_table_export_data()
+        cards = self._collect_section_export_cards()
+        serial_cards: list[dict[str, Any]] = []
+        for idx, card in enumerate(cards):
+            item = dict(card)
+            section = item.pop("section", None)
+            if section is not None:
+                image_path = os.path.join(tmpdir, f"section_{idx + 1}.png")
+                self._render_section_report_image(section, image_path, dpi=dpi)
+                item["image_path"] = image_path
+            item["title"] = self._build_section_report_title(card)
+            serial_cards.append(item)
+
+        return {
+            "headers": headers,
+            "data": data,
+            "row_ok": row_ok,
+            "cards": serial_cards,
+            "fs_required": float(self.n_min.value()),
+            "n_beams": int(self.n_beams),
+            "deflection_context": dict(self._deflection_context) if self._deflection_context else None,
+        }
+
+    def export_verification_report(self, path: str, *, dpi: int = 300) -> None:
+        """Compatibilidad: exporta usando el pipeline único de memoria de cálculo."""
+        try:
+            with tempfile.TemporaryDirectory(prefix="semi_beam_verify_") as td:
+                verification = self.build_verification_export_payload(td, dpi=dpi)
+                export_memoria_docx(
+                    path,
+                    header=MemoriaHeader(titulo="Memoria de Cálculo - Verificación de viga", fecha=None),
+                    seccion=MemoriaSeccion(fs_min=float(self.n_min.value()), n_vigas=int(self.n_beams)),
+                    verification=verification,
+                )
+        except Exception as e:
+            raise RuntimeError(f"No se pudo exportar la memoria de cálculo: {e}")
+
+    def _build_docx_verification_report(
+        self,
+        path: str,
+        *,
+        cards: list[dict[str, Any]],
+        headers: list[str],
+        data: list[list[str]],
+        row_ok: list[bool],
+        dpi: int,
+    ) -> None:
+        """Compatibilidad interna: delega al pipeline único de memoria_calculo_docx."""
+        try:
+            with tempfile.TemporaryDirectory(prefix="semi_beam_verify_") as td:
+                serial_cards: list[dict[str, Any]] = []
+                for idx, card in enumerate(cards):
+                    item = dict(card)
+                    section = item.pop("section", None)
+                    if section is not None:
+                        image_path = os.path.join(td, f"section_{idx + 1}.png")
+                        self._render_section_report_image(section, image_path, dpi=dpi)
+                        item["image_path"] = image_path
+                    item["title"] = self._build_section_report_title(card)
+                    serial_cards.append(item)
+                export_memoria_docx(
+                    path,
+                    header=MemoriaHeader(titulo="Memoria de Cálculo - Verificación de viga", fecha=None),
+                    seccion=MemoriaSeccion(fs_min=float(self.n_min.value()), n_vigas=int(self.n_beams)),
+                    verification={
+                        "headers": headers,
+                        "data": data,
+                        "row_ok": row_ok,
+                        "cards": serial_cards,
+                        "fs_required": float(self.n_min.value()),
+                        "n_beams": int(self.n_beams),
+                        "deflection_context": dict(self._deflection_context) if self._deflection_context else None,
+                    },
+                )
+        except Exception as e:
+            raise RuntimeError(f"No se pudo exportar la memoria de cálculo: {e}")
+
     def extract_memoria_data(self) -> dict:
         """Extrae datos necesarios para exportar Memoria de Cálculo (sin dependencias del motor)."""
         def _sigma(label: str) -> str:
@@ -686,16 +1004,25 @@ class SectionCheckPanel(QWidget):
             "bf_text": self.lbl_bf.text(),
             "fs_min": float(self.n_min.value()),
             "n_beams": int(self.n_beams),
+            "deflection": dict(self._deflection_context) if self._deflection_context else None,
             "rows": [],
         }
 
         for r in range(self.tbl.rowCount()):
+            x_value = _try_float(_get_text(self.tbl, r, self.COL_X))
+            v_value = None
+            if self._shear_provider is not None and x_value is not None:
+                try:
+                    v_value = float(self._shear_provider(float(x_value)))
+                except Exception:
+                    v_value = None
             row = {
                 "sec": _get_text(self.tbl, r, self.COL_SEC),
                 "x_mm": _get_text(self.tbl, r, self.COL_X),
                 "h_web_mm": _get_text(self.tbl, r, self.COL_HWEB),
                 "t_web_in": self._current_tweb_in(r),
                 "M_kgcm": _get_text(self.tbl, r, self.COL_M),
+                "V_kg": "" if v_value is None else _fmt2(v_value),
                 "FS": _get_text(self.tbl, r, self.COL_FS),
                 "Jx_cm4": _get_text(self.tbl, r, self.COL_JX),
                 "ybar_cm": _get_text(self.tbl, r, self.COL_YBAR),
@@ -737,3 +1064,64 @@ class SectionCheckPanel(QWidget):
         if xs.size == 1:
             return np.full_like(xq, float(ix[0]), dtype=float)
         return np.interp(xq, xs, ix, left=float(ix[0]), right=float(ix[-1]))
+
+    def export_state(self) -> Dict[str, Any]:
+        rows: List[Dict[str, str]] = []
+        for r in range(self.tbl.rowCount()):
+            rows.append(
+                {
+                    "x_mm": _get_text(self.tbl, r, self.COL_X),
+                    "h_web_mm": _get_text(self.tbl, r, self.COL_HWEB),
+                    "t_web_in": self._current_tweb_in(r),
+                }
+            )
+        return {
+            "material_top": self._current_material_id(self.cmb_mat_top),
+            "material_bot": self._current_material_id(self.cmb_mat_bot),
+            "material_web": self._current_material_id(self.cmb_mat_web),
+            "t_top_in": self._current_thickness_in(self.cmb_t_top),
+            "t_bot_in": self._current_thickness_in(self.cmb_t_bot),
+            "fs_min": float(self.n_min.value()),
+            "rows": rows,
+        }
+
+    def import_state(self, state: Optional[Dict[str, Any]]) -> None:
+        if not isinstance(state, dict):
+            return
+
+        def _set_combo_data(cmb: QComboBox, value: Any) -> None:
+            idx = cmb.findData(value)
+            if idx >= 0:
+                cmb.setCurrentIndex(idx)
+
+        self.blockSignals(True)
+        self.tbl.blockSignals(True)
+        try:
+            _set_combo_data(self.cmb_mat_top, state.get("material_top"))
+            _set_combo_data(self.cmb_mat_bot, state.get("material_bot"))
+            _set_combo_data(self.cmb_mat_web, state.get("material_web"))
+            _set_combo_data(self.cmb_t_top, state.get("t_top_in"))
+            _set_combo_data(self.cmb_t_bot, state.get("t_bot_in"))
+
+            fs_min = state.get("fs_min")
+            if fs_min is not None:
+                try:
+                    self.n_min.setValue(float(fs_min))
+                except Exception:
+                    pass
+
+            rows = state.get("rows")
+            if isinstance(rows, list):
+                for r in range(self.tbl.rowCount()):
+                    row = rows[r] if r < len(rows) and isinstance(rows[r], dict) else {}
+                    _set_item(self.tbl, r, self.COL_X, str(row.get("x_mm", "")))
+                    _set_item(self.tbl, r, self.COL_HWEB, str(row.get("h_web_mm", "")))
+                    if r < len(self._tweb_widgets):
+                        _set_combo_data(self._tweb_widgets[r], row.get("t_web_in"))
+        finally:
+            self.tbl.blockSignals(False)
+            self.blockSignals(False)
+
+        self._update_sigma_labels()
+        self._repaint_preview_from_selection()
+        self._recompute_all()

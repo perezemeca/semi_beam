@@ -1,34 +1,41 @@
-calculeitor (semi_beam) - ETAPA 1
+calculeitor (semi_beam) - versión 0.2.0
 
-Aplicacion de escritorio para calculo de viga isostatica en:
+Aplicación de escritorio para cálculo estructural preliminar de vigas de carrocerías en:
 - Acoplado
 - Semirremolque
 - Bitren (primera especie)
 
 Incluye:
-- FBD + diagramas V(x), M(x)
-- Resolucion de equilibrio (q faltante + posicion de tandem)
-- Pestana "Semirremolque - Reacciones" con calculo en tiempo real de reacciones y busqueda de configuracion
-- Verificacion de seccion a flexion
-- Export de imagenes JPG
-- Export de memoria en PDF
-- Export de memoria en DOCX (base template)
+- Esquema de cuerpo libre y diagramas V(x), M(x) y deformada.
+- Resolución de equilibrio para q faltante y posición de tándem.
+- Pestaña "Cálculo y verificación" para reacciones de semirremolque y búsqueda de configuración.
+- Verificación de sección a flexión con materiales y tabla de secciones.
+- Guardado y carga de estudios `.sbeam`.
+- Exportación de imágenes JPG.
+- Exportación de memoria de cálculo en DOCX.
 
 Nota operativa:
-- Word convierte DOCX->PDF de forma manual.
+- El exportador principal genera DOCX. Si hace falta PDF, se puede convertir desde Word.
 
 Requisitos
 - Windows 11
-- Python 3.14.2
+- Python 3.11 o superior
+- Dependencias de runtime en `requirements.txt`
+- Herramientas opcionales de pruebas/armado en `requirements-dev.txt`
+
+Dependencias
+- Ejecución: PySide6, matplotlib, numpy, reportlab y python-docx.
+- Pruebas: pytest.
+- Armado del ejecutable: pyinstaller.
 
 Estructura clave
-- `scripts/run_app.py` (arranque app)
-- `scripts/smoke_check.py` (prueba minima sin abrir UI)
+- `scripts/run_app.py` (arranque de la app)
+- `scripts/smoke_check.py` (prueba mínima sin abrir UI)
 - `scripts/prepare_release_assets.py` (genera icono/template si faltan)
 - `src/semi_beam/...` (paquete principal)
 - `assets/branding/calculeitor.ico` (icono)
-- `assets/templates/memoria_base.docx` (template memoria)
-- `calculeitor.spec` (build PyInstaller one-file)
+- `assets/templates/memoria_base.docx` (template de memoria)
+- `calculeitor.spec` (ejecutable PyInstaller de un solo archivo)
 
 Comandos (PowerShell)
 
@@ -40,18 +47,24 @@ python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
+Para correr pruebas o armar el ejecutable:
+```powershell
+pip install -r requirements-dev.txt
+```
+
 2) Correr la app
 ```powershell
-.venv\Scripts\python.exe scripts\run_app.py
+python scripts/run_app.py
 ```
-Opcional (si `src` esta en PYTHONPATH o editable):
+
+Opcional:
 ```powershell
-.venv\Scripts\python.exe -m semi_beam
+python -m semi_beam
 ```
 
 3) Ejecutar smoke_check
 ```powershell
-.venv\Scripts\python.exe scripts\smoke_check.py
+python scripts/smoke_check.py
 ```
 Genera en carpeta temporal:
 - `FBD.jpg`
@@ -59,18 +72,18 @@ Genera en carpeta temporal:
 - `M.jpg`
 - `Memoria - Smoke.docx`
 
-4) Generar EXE one-file con PyInstaller
+4) Correr pruebas
 ```powershell
-.venv\Scripts\python.exe scripts\prepare_release_assets.py
-.venv\Scripts\pyinstaller.exe --clean calculeitor.spec
+pytest -q
+```
+
+5) Generar EXE de un solo archivo con PyInstaller
+```powershell
+python scripts/prepare_release_assets.py
+pyinstaller --clean calculeitor.spec
 ```
 Salida esperada:
 - `dist\calculeitor.exe`
-
-5) Ejecutar tests
-```powershell
-.venv\Scripts\python.exe -m pytest tests
-```
 
 Notas de build
 - El `.spec` empaqueta:
@@ -78,6 +91,7 @@ Notas de build
   - `assets/templates/memoria_base.docx`
   - `assets/branding/calculeitor.ico`
 - Nombre de producto/EXE: `calculeitor`.
+- Los artefactos generados (`dist/`, `build/`, `.tmp/`, logs, memorias exportadas y estudios `.sbeam`) quedan fuera de Git por `.gitignore`.
 
 Licencia
 - Uso interno / privado.

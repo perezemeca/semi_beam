@@ -206,6 +206,7 @@ class SemiTrailerReactionsTab(QWidget):
         self._plot_state: Optional[ReactionsPlotState] = None
         self._last_result: Optional[ReactionsResult] = None
         self._last_diag = None
+        self.memoria_header: Dict[str, Any] = {}
         self._search_worker: Optional[_SearchWorker] = None
         self._all_boxes: List[CollapsibleBox] = []
 
@@ -464,14 +465,112 @@ class SemiTrailerReactionsTab(QWidget):
         self._last_diag = diag
         if diag is None:
             self.section_panel.set_moment_provider(None)
+            self.section_panel.set_shear_provider(None)
+            self.section_panel.set_deflection_context(None)
             self.section_panel.clear_results_only(clear_moments_if_no_provider=True)
             self.clear_deflection_summary()
         else:
             self.section_panel.set_moment_provider(lambda x_mm: float(diag.eval_M(float(x_mm))) / 10.0)
+            self.section_panel.set_shear_provider(lambda x_mm: float(diag.eval_V(float(x_mm))))
             self.section_panel.clear_results_only()
 
     def get_diag(self):
         return self._last_diag
+
+    def export_state(self) -> Dict[str, Any]:
+        loads: List[Dict[str, Any]] = []
+        for row in range(self.tbl.rowCount()):
+            loads.append(
+                {
+                    "type": self._type_combo(row).currentText(),
+                    "magnitude": _get_text(self.tbl, row, self.COL_MAG),
+                    "position": _get_text(self.tbl, row, self.COL_POS),
+                    "length": _get_text(self.tbl, row, self.COL_LEN),
+                }
+            )
+        return {
+            "mode_index": int(self.mode.currentIndex()),
+            "L": float(self.L.value()),
+            "x_a": float(self.x_a.value()),
+            "x_b": float(self.x_b.value()),
+            "x_k": float(self.x_k.value()),
+            "x_t": float(self.x_t.value()),
+            "x_t_min": float(self.x_t_min.value()),
+            "x_t_max": float(self.x_t_max.value()),
+            "offset": float(self.offset.value()),
+            "limit_ra": float(self.limit_ra.value()),
+            "limit_rb": float(self.limit_rb.value()),
+            "limit_rk": float(self.limit_rk.value()),
+            "limit_rd": float(self.limit_rd.value()),
+            "limit_rt": float(self.limit_rt.value()),
+            "show_vm": bool(self.chk_show_vm.isChecked()),
+            "show_deflection": bool(self.chk_show_deflection.isChecked()),
+            "loads": loads,
+            "section_panel": self.section_panel.export_state(),
+        }
+
+    def import_state(self, state: Optional[Dict[str, Any]]) -> None:
+        if not isinstance(state, dict):
+            return
+
+        def _set_spin(sp: QDoubleSpinBox, key: str) -> None:
+            value = state.get(key)
+            if value is None:
+                return
+            try:
+                sp.setValue(float(value))
+            except Exception:
+                pass
+
+        self.blockSignals(True)
+        self.tbl.blockSignals(True)
+        try:
+            mode_index = state.get("mode_index")
+            if mode_index is not None:
+                try:
+                    self.mode.setCurrentIndex(int(mode_index))
+                except Exception:
+                    pass
+
+            for key, sp in (
+                ("L", self.L),
+                ("x_a", self.x_a),
+                ("x_b", self.x_b),
+                ("x_k", self.x_k),
+                ("x_t", self.x_t),
+                ("x_t_min", self.x_t_min),
+                ("x_t_max", self.x_t_max),
+                ("offset", self.offset),
+                ("limit_ra", self.limit_ra),
+                ("limit_rb", self.limit_rb),
+                ("limit_rk", self.limit_rk),
+                ("limit_rd", self.limit_rd),
+                ("limit_rt", self.limit_rt),
+            ):
+                _set_spin(sp, key)
+
+            self.chk_show_vm.setChecked(bool(state.get("show_vm", True)))
+            self.chk_show_deflection.setChecked(bool(state.get("show_deflection", True)))
+
+            self.tbl.setRowCount(0)
+            loads = state.get("loads")
+            if isinstance(loads, list):
+                for load in loads:
+                    if not isinstance(load, dict):
+                        continue
+                    self._add_load_row(load_type=str(load.get("type", "Puntual")))
+                    row = self.tbl.rowCount() - 1
+                    _set_item(self.tbl, row, self.COL_MAG, str(load.get("magnitude", "")))
+                    _set_item(self.tbl, row, self.COL_POS, str(load.get("position", "")))
+                    _set_item(self.tbl, row, self.COL_LEN, str(load.get("length", "")))
+                    self._refresh_row_mode(row)
+        finally:
+            self.tbl.blockSignals(False)
+            self.blockSignals(False)
+
+        self.section_panel.import_state(state.get("section_panel"))
+        self._update_geometry_labels()
+        self.recompute_now()
 
     def _sync_offset_slider(self, value: float):
         iv = int(round(float(value)))

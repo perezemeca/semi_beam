@@ -3,8 +3,22 @@
 __pycache__/
 *.py[cod]
 *.egg-info/
-logs/app.log
+logs/
+*.log
+.tmp/
+.pytest_tmp/
+pytest-cache-files-*/
 build/
 dist/
 .pytest_cache/
 Memoria_calculo_*.pdf
+Memoria - Calculo y verificacion - *.docx
+Memoria - Calculo y verificación - *.docx
+Memoria - Smoke.docx
+verificacion_viga.docx
+*.sbeam
+FBD.jpg
+V.jpg
+M.jpg
+Deformada.jpg
+Secciones.jpg

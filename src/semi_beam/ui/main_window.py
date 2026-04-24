@@ -5,7 +5,7 @@ import sys
 import os
 import tempfile
 from datetime import datetime
-from dataclasses import dataclass, field, fields as dc_fields, is_dataclass
+from dataclasses import dataclass, field
 from typing import List, Optional, Tuple, Dict, Any
 
 import matplotlib
@@ -14,7 +14,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QWheelEvent, QIcon, QColor, QBrush
+from PySide6.QtGui import QWheelEvent, QIcon, QColor, QBrush, QAction
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
     QLabel, QDoubleSpinBox, QPushButton, QTableWidget, QTableWidgetItem,
@@ -48,11 +48,15 @@ from semi_beam.engine.equilibrium import solve_equilibrium
 from semi_beam.engine.deflection import compute_total_deflection
 from semi_beam.engine.diagrams import build_V_M
 from semi_beam.view.renderer_vm import render_shear, render_moment, render_deflection
-from semi_beam.services.memoria_calculo_pdf import (
-    export_memoria_pdf, MemoriaHeader, MemoriaCaso, MemoriaResultados, MemoriaSeccion
+from semi_beam.services.memoria_calculo_docx import (
+    export_memoria_docx,
+    MemoriaHeader,
+    MemoriaCaso,
+    MemoriaResultados,
+    MemoriaSeccion,
 )
-from semi_beam.services.memoria_calculo_docx import export_memoria_docx, ensure_memoria_template, default_template_path
 from semi_beam.services.branding import ensure_calculeitor_icon
+from semi_beam.services.study_storage import load_study_file, save_study_file
 
 # ---- Verificador (TU UI anterior) ----
 from semi_beam.ui.section_check_panel import SectionCheckPanel
@@ -201,33 +205,10 @@ def _fmt_plain(v, decimals: int = 2) -> str:
     return s
 
 
-def _dc_field_names(cls) -> set[str]:
-    try:
-        return {f.name for f in dc_fields(cls)}
-    except Exception:
-        return set()
 
 
-def _dc_make(cls, data: Dict[str, Any]):
-    """
-    Construye dataclass tolerante a cambios:
-    - filtra keys inexistentes
-    - si el cls no es dataclass, intenta llamar igual con kwargs filtrados por signature (best effort)
-    """
-    fset = _dc_field_names(cls)
-    if fset:
-        kwargs = {k: v for k, v in data.items() if k in fset}
-        return cls(**kwargs)
-    # fallback no-dataclass (o dataclass sin introspección)
-    try:
-        return cls(**data)
-    except Exception:
-        # último recurso: intenta con keys comunes
-        common = {}
-        for k in ("titulo", "cliente", "proyecto", "cliente_proyecto", "autor", "revision", "fecha"):
-            if k in data:
-                common[k] = data[k]
-        return cls(**common)
+APP_VERSION = "0.2.0"
+MEMORIA_EXPORT_IMAGE_DPI = 220
 
 
 # ============================================================
@@ -256,6 +237,7 @@ class UnitTab(QWidget):
 
         self._cached: Optional[SessionCache] = None
         self._last_diag = None
+        self._view_mode = "inputs"
 
         self._all_boxes: List[CollapsibleBox] = []
 
@@ -675,6 +657,7 @@ class UnitTab(QWidget):
         self._clear_motor_inputs()
         self.set_note("(sin notas)")
         self.clear_deflection_summary()
+        self.set_view_mode("inputs")
         self.set_cache(None)
         self.set_diag(None)
 
@@ -898,20 +881,35 @@ class UnitTab(QWidget):
         self._last_diag = diag
         if diag is None:
             self.section_panel.set_moment_provider(None)
+            self.section_panel.set_shear_provider(None)
+            self.section_panel.set_deflection_context(None)
             self.section_panel.clear_results_only(clear_moments_if_no_provider=True)
             self.clear_deflection_summary()
         else:
             self.section_panel.set_moment_provider(lambda x_mm: float(diag.eval_M(float(x_mm))) / 10.0)
+            self.section_panel.set_shear_provider(lambda x_mm: float(diag.eval_V(float(x_mm))))
             self.section_panel.clear_results_only()
 
     def get_diag(self):
         return self._last_diag
+
+    def set_view_mode(self, mode: str):
+        self._view_mode = "solved" if str(mode).strip().lower() == "solved" else "inputs"
+
+    def view_mode(self) -> str:
+        return self._view_mode
 
     def deflection_enabled(self) -> bool:
         return bool(self.chk_show_deflection.isChecked())
 
     def deflection_params(self) -> Optional[float]:
         return 2.1e4
+
+    def deflection_supports(self) -> Optional[Tuple[float, float]]:
+        cache = self.get_cache()
+        if cache is None:
+            return None
+        return cache.deflection_supports
 
     def set_deflection_summary(self, text: str, *, ok: Optional[bool] = None):
         color = "#1F1F1F"
@@ -925,6 +923,107 @@ class UnitTab(QWidget):
     def clear_deflection_summary(self, text: str = "Convexidad L/2: +30 mm\nvmin total: -\nUtilizado: - / 60 mm\nEstado: -"):
         self.set_deflection_summary(text, ok=None)
 
+    def export_state(self) -> Dict[str, Any]:
+        def _table_rows(tbl: QTableWidget) -> List[List[str]]:
+            rows: List[List[str]] = []
+            for r in range(tbl.rowCount()):
+                rows.append([_get_text(tbl, r, c) for c in range(tbl.columnCount())])
+            return rows
+
+        return {
+            "semi_tipo": self.cmb_semi_tipo.currentText() if hasattr(self, "cmb_semi_tipo") else None,
+            "config_text": self.cmb_config.currentText(),
+            "motor_inputs": {
+                "Lc": _spin_text(self.Lc),
+                "x_front_or_kp": _spin_text(self.x_front_or_kp),
+                "R_front_or_kp": _spin_text(self.R_front_or_kp),
+                "Rt": _spin_text(self.Rt),
+                "Rd": _spin_text(self.Rd),
+                "dir_offset": _spin_text(self.dir_offset),
+                "x_rp2_rel": _spin_text(self.x_rp2_rel),
+                "Rp2": _spin_text(self.Rp2),
+            },
+            "show_deflection": bool(self.chk_show_deflection.isChecked()),
+            "view_mode": self.view_mode(),
+            "tbl_points": _table_rows(self.tbl_points),
+            "tbl_dists": _table_rows(self.tbl_dists),
+            "tbl_moms": _table_rows(self.tbl_moms),
+            "section_panel": self.section_panel.export_state(),
+        }
+
+    def import_state(self, state: Optional[Dict[str, Any]]) -> None:
+        if not isinstance(state, dict):
+            return
+
+        def _set_combo_text(cmb: QComboBox, text: Any) -> None:
+            if text is None:
+                return
+            idx = cmb.findText(str(text))
+            if idx >= 0:
+                cmb.setCurrentIndex(idx)
+
+        def _set_spin_from_text(sp: QDoubleSpinBox, text: Any) -> None:
+            raw = "" if text is None else str(text).strip()
+            if raw == "":
+                sp.setValue(float(sp.minimum()))
+                line_edit = sp.lineEdit()
+                if line_edit is not None:
+                    line_edit.clear()
+                return
+            try:
+                sp.setValue(float(raw.replace(",", ".")))
+            except Exception:
+                line_edit = sp.lineEdit()
+                if line_edit is not None:
+                    line_edit.setText(raw)
+
+        def _fill_table(tbl: QTableWidget, rows: Any) -> None:
+            tbl.blockSignals(True)
+            try:
+                tbl.setRowCount(0)
+                if not isinstance(rows, list):
+                    return
+                for row_values in rows:
+                    values = [str(v) for v in row_values] if isinstance(row_values, list) else []
+                    r = tbl.rowCount()
+                    tbl.insertRow(r)
+                    for c in range(tbl.columnCount()):
+                        _set_item(tbl, r, c, values[c] if c < len(values) else "")
+            finally:
+                tbl.blockSignals(False)
+            self._refresh_table_edit_locks(tbl)
+
+        semi_tipo = state.get("semi_tipo")
+        if hasattr(self, "cmb_semi_tipo") and semi_tipo is not None:
+            _set_combo_text(self.cmb_semi_tipo, semi_tipo)
+            self._populate_configs()
+
+        _set_combo_text(self.cmb_config, state.get("config_text"))
+
+        motor_inputs = state.get("motor_inputs")
+        if isinstance(motor_inputs, dict):
+            for key, spin in (
+                ("Lc", self.Lc),
+                ("x_front_or_kp", self.x_front_or_kp),
+                ("R_front_or_kp", self.R_front_or_kp),
+                ("Rt", self.Rt),
+                ("Rd", self.Rd),
+                ("dir_offset", self.dir_offset),
+                ("x_rp2_rel", self.x_rp2_rel),
+                ("Rp2", self.Rp2),
+            ):
+                _set_spin_from_text(spin, motor_inputs.get(key))
+
+        self.chk_show_deflection.setChecked(bool(state.get("show_deflection", True)))
+        _fill_table(self.tbl_points, state.get("tbl_points"))
+        _fill_table(self.tbl_dists, state.get("tbl_dists"))
+        _fill_table(self.tbl_moms, state.get("tbl_moms"))
+        self.section_panel.import_state(state.get("section_panel"))
+        self.set_view_mode(str(state.get("view_mode", "inputs")))
+        self.set_cache(None)
+        self.set_diag(None)
+        self.set_note("(sin notas)")
+
 
 # ============================================================
 # MAIN WINDOW
@@ -932,12 +1031,13 @@ class UnitTab(QWidget):
 class FBDApp(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("calculeitor — Acoplado / Semirremolque / Bitren")
+        self.setWindowTitle(f"calculeitor {APP_VERSION} - Acoplado / Semirremolque / Bitren")
         self.resize(1500, 850)
         try:
             self.setWindowIcon(QIcon(ensure_calculeitor_icon()))
         except Exception:
             pass
+        self._build_about_menu()
 
         root = QWidget()
         self.setCentralWidget(root)
@@ -963,7 +1063,7 @@ class FBDApp(QMainWindow):
         self.tabs.addTab(self.tab_acoplado, "Acoplado")
         self.tabs.addTab(self.tab_semi, "Semirremolque")
         self.tabs.addTab(self.tab_bitren, "Bitren")
-        self.tabs.addTab(self.tab_reactions, "Calculo y verificación")
+        self.tabs.addTab(self.tab_reactions, "Cálculo y verificación")
 
         left_lay.addWidget(self.tabs)
 
@@ -996,11 +1096,13 @@ class FBDApp(QMainWindow):
         self.plot_scroll.setWidget(self.canvas)
 
         btn_row = QHBoxLayout()
+        self.btn_save_study = QPushButton("Guardar estudio")
+        self.btn_load_study = QPushButton("Cargar estudio")
         self.btn_export_plots = QPushButton("Exportar gráficos (FBD, V(x), M(x), deformada)")
-        self.btn_export_memoria = QPushButton("Exportar memoria de cálculo (PDF)")
-        self.btn_export_memoria_docx = QPushButton("Exportar Memoria (DOCX)")
+        self.btn_export_memoria_docx = QPushButton("Exportar memoria de cálculo")
+        btn_row.addWidget(self.btn_save_study)
+        btn_row.addWidget(self.btn_load_study)
         btn_row.addWidget(self.btn_export_plots)
-        btn_row.addWidget(self.btn_export_memoria)
         btn_row.addWidget(self.btn_export_memoria_docx)
         btn_row.addStretch(1)
 
@@ -1052,8 +1154,9 @@ class FBDApp(QMainWindow):
         self.tab_reactions.section_panel.inertia_inputs_changed.connect(self._schedule_active_replot)
 
         self.tabs.currentChanged.connect(lambda _i: self._on_tab_changed())
+        self.btn_save_study.clicked.connect(self._save_study)
+        self.btn_load_study.clicked.connect(self._load_study)
         self.btn_export_plots.clicked.connect(self._export_plots_jpg_1200)
-        self.btn_export_memoria.clicked.connect(self._export_memoria_pdf)
         self.btn_export_memoria_docx.clicked.connect(self._export_memoria_docx)
 
         self.active_tab().set_note("Complete las entradas para visualizar y resolver.")
@@ -1065,6 +1168,25 @@ class FBDApp(QMainWindow):
         self._resize_timer.timeout.connect(self._replot_active_tab)
         self.canvas.mpl_connect("resize_event", lambda evt: self._resize_timer.start(80))
 
+    def _build_about_menu(self) -> None:
+        help_menu = self.menuBar().addMenu("Ayuda")
+        about_action = QAction("Acerca de calculeitor", self)
+        about_action.triggered.connect(self._show_about)
+        help_menu.addAction(about_action)
+
+    def _show_about(self) -> None:
+        QMessageBox.about(
+            self,
+            "Acerca de calculeitor",
+            (
+                f"calculeitor {APP_VERSION}\n\n"
+                "Aplicación de escritorio para cálculo de vigas de acoplados, "
+                "semirremolques y bitrenes.\n\n"
+                "Incluye equilibrio, reacciones, diagramas V/M, deformada, "
+                "verificación de sección, estudios .sbeam y memoria de cálculo DOCX."
+            ),
+        )
+
     def active_tab(self):
         return self.tabs.currentWidget()
 
@@ -1073,9 +1195,63 @@ class FBDApp(QMainWindow):
         self._replot_active_tab()
 
     def _update_export_buttons(self):
-        is_reactions = self.active_tab() is self.tab_reactions
-        self.btn_export_memoria.setEnabled(not is_reactions)
-        self.btn_export_memoria_docx.setEnabled(not is_reactions)
+        self.btn_export_memoria_docx.setEnabled(True)
+
+    def _export_study_state(self) -> Dict[str, Any]:
+        return {
+            "version": 1,
+            "saved_at": datetime.now().isoformat(timespec="seconds"),
+            "active_tab_index": int(self.tabs.currentIndex()),
+            "tabs": {
+                "acoplado": self.tab_acoplado.export_state(),
+                "semirremolque": self.tab_semi.export_state(),
+                "bitren": self.tab_bitren.export_state(),
+                "reacciones": self.tab_reactions.export_state(),
+            },
+        }
+
+    def _apply_study_state(self, state: Dict[str, Any]) -> None:
+        tabs = state.get("tabs")
+        if not isinstance(tabs, dict):
+            raise ValueError("El archivo no contiene pestaÃ±as de estudio vÃ¡lidas.")
+
+        self.tab_acoplado.import_state(tabs.get("acoplado"))
+        self.tab_semi.import_state(tabs.get("semirremolque"))
+        self.tab_bitren.import_state(tabs.get("bitren"))
+        self.tab_reactions.import_state(tabs.get("reacciones"))
+
+        active_tab_index = state.get("active_tab_index", 0)
+        try:
+            active_tab_index = int(active_tab_index)
+        except Exception:
+            active_tab_index = 0
+        active_tab_index = max(0, min(active_tab_index, self.tabs.count() - 1))
+        self.tabs.setCurrentIndex(active_tab_index)
+        self._replot_active_tab()
+
+    def _save_study(self):
+        default_name = f"estudio_{datetime.now().strftime('%Y%m%d_%H%M%S')}.sbeam"
+        path, _ = QFileDialog.getSaveFileName(self, "Guardar estudio", default_name, "Estudio Semi Beam (*.sbeam)")
+        if not path:
+            return
+        if not path.lower().endswith(".sbeam"):
+            path += ".sbeam"
+        try:
+            save_study_file(path, self._export_study_state())
+            QMessageBox.information(self, "Guardar estudio", f"Estudio guardado en:\n{path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Guardar estudio", f"No se pudo guardar el estudio: {e}")
+
+    def _load_study(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Cargar estudio", "", "Estudio Semi Beam (*.sbeam)")
+        if not path:
+            return
+        try:
+            state = load_study_file(path)
+            self._apply_study_state(state)
+            QMessageBox.information(self, "Cargar estudio", f"Estudio cargado desde:\n{path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Cargar estudio", f"No se pudo cargar el estudio: {e}")
 
     def _schedule_active_replot(self):
         self._redraw_timer.start(60)
@@ -1102,9 +1278,11 @@ class FBDApp(QMainWindow):
 
     def _schedule_replot_tab(self, tab: UnitTab, *, reset_solution: bool):
         if reset_solution:
+            tab.set_view_mode("inputs")
             tab.set_cache(None)
             tab.set_diag(None)
-        self._redraw_timer.start(90)
+        if tab is self.active_tab():
+            self._redraw_timer.start(90)
 
     def _current_style(self) -> RenderStyle:
         return RenderStyle()
@@ -1255,6 +1433,8 @@ class FBDApp(QMainWindow):
             self.ax_defl.text(0.5, 0.5, unavailable_text, ha="center", va="center", transform=self.ax_defl.transAxes)
             if summary_target is not None:
                 summary_target.clear_deflection_summary("Convexidad L/2: +30 mm\nvmin total: -\nUtilizado: - / 60 mm\nEstado: desactivada")
+                if hasattr(summary_target, "section_panel"):
+                    summary_target.section_panel.set_deflection_context(None)
             return
 
         if payload is None:
@@ -1263,12 +1443,23 @@ class FBDApp(QMainWindow):
             self.ax_defl.text(0.5, 0.5, "Deformada no disponible. Complete la tabla de secciones.", ha="center", va="center", transform=self.ax_defl.transAxes)
             if summary_target is not None:
                 summary_target.clear_deflection_summary("Convexidad L/2: +30 mm\nvmin total: -\nUtilizado: - / 60 mm\nEstado: complete la tabla de secciones")
+                if hasattr(summary_target, "section_panel"):
+                    summary_target.section_panel.set_deflection_context(None)
             return
 
         result, i_source = payload
         render_deflection(self.ax_defl, result, y_zoom=1.0, xlim=xlim)
         if summary_target is not None:
             summary_target.set_deflection_summary(self._deflection_summary_text(result, i_source), ok=bool(result.ok))
+            if hasattr(summary_target, "section_panel"):
+                summary_target.section_panel.set_deflection_context(result, i_source=i_source)
+
+    def _save_axis_snapshot(self, ax, out_path: str, *, dpi: int = MEMORIA_EXPORT_IMAGE_DPI):
+        fig = self.fig
+        self.canvas.draw()
+        renderer = fig.canvas.get_renderer()
+        bbox = ax.get_tightbbox(renderer).transformed(fig.dpi_scale_trans.inverted())
+        fig.savefig(out_path, dpi=int(dpi), bbox_inches=bbox)
 
     # Plotting
     def _plot_triplet(self, cache: SessionCache, *, set_diag_on_tab: Optional[UnitTab] = None):
@@ -1297,7 +1488,7 @@ class FBDApp(QMainWindow):
         self.ax_M.tick_params(labelbottom=True)
 
         defl_payload = None
-        if set_diag_on_tab is not None:
+        if set_diag_on_tab is not None and set_diag_on_tab.deflection_enabled():
             defl_payload = self._compute_deflection_result(
                 diag=diag,
                 beam_L_mm=beam_plot.L_mm,
@@ -1330,7 +1521,7 @@ class FBDApp(QMainWindow):
         state = tab.current_plot_state()
         if state is None:
             tab.set_diag(None)
-            self._clear_plot_canvas("Calculo y verificación: complete datos válidos para calcular.")
+            self._clear_plot_canvas("Cálculo y verificación: complete datos válidos para calcular.")
             return
 
         xlim = _compute_x_view(state.beam.L_mm, state.point_forces, state.dist_loads, state.moments)
@@ -1362,13 +1553,15 @@ class FBDApp(QMainWindow):
                 ax.set_axis_off()
                 ax.text(0.5, 0.5, title, ha="center", va="center", transform=ax.transAxes)
 
-        defl_payload = self._compute_deflection_result(
-            diag=diag,
-            beam_L_mm=state.beam.L_mm,
-            supports=tab.deflection_supports(),
-            params=tab.deflection_params(),
-            section_panel=tab.section_panel,
-        )
+        defl_payload = None
+        if tab.deflection_enabled():
+            defl_payload = self._compute_deflection_result(
+                diag=diag,
+                beam_L_mm=state.beam.L_mm,
+                supports=tab.deflection_supports(),
+                params=tab.deflection_params(),
+                section_panel=tab.section_panel,
+            )
         self._render_deflection_axis(
             payload=defl_payload,
             xlim=xlim,
@@ -1387,7 +1580,10 @@ class FBDApp(QMainWindow):
             return
         cache = tab.get_cache()
         if cache is None:
-            self._plot_inputs_for_tab(tab)
+            if tab.view_mode() == "solved":
+                self._solve_for_tab(tab)
+            else:
+                self._plot_inputs_for_tab(tab)
             return
         self._plot_triplet(cache, set_diag_on_tab=tab)
 
@@ -1399,6 +1595,7 @@ class FBDApp(QMainWindow):
                 note += "\nNotas:\n- " + "\n- ".join(notes)
 
             cache = SessionCache(beam_plot=beam, points=points, dists=dists, moms=moms, note_text=note, deflection_supports=None)
+            tab.set_view_mode("inputs")
             tab.set_cache(cache)
             tab.set_note(note)
             self._plot_triplet(cache, set_diag_on_tab=tab)
@@ -1406,6 +1603,7 @@ class FBDApp(QMainWindow):
         except Exception as e:
             msg = str(e)
             if msg.startswith("VALIDACION:"):
+                tab.set_view_mode("inputs")
                 tab.set_cache(None)
                 tab.set_note(msg.replace("VALIDACION:", "").strip())
                 tab.set_diag(None)
@@ -1413,6 +1611,7 @@ class FBDApp(QMainWindow):
                     self._clear_plot_canvas(msg.replace("VALIDACION:", "").strip())
                 return
             QMessageBox.critical(self, "Error", f"Error al graficar entradas: {e}")
+            tab.set_view_mode("inputs")
             tab.set_cache(None)
             tab.set_note(f"Error: {e}")
             tab.set_diag(None)
@@ -1553,6 +1752,7 @@ class FBDApp(QMainWindow):
             note = "\n".join(note_lines)
             cache.note_text = note
 
+            tab.set_view_mode("solved")
             tab.set_cache(cache)
             tab.set_note(note)
 
@@ -1561,12 +1761,13 @@ class FBDApp(QMainWindow):
 
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Error al resolver equilibrio: {e}")
+            tab.set_view_mode("inputs")
             tab.set_cache(None)
             tab.set_note(f"Error: {e}")
             tab.set_diag(None)
 
-    # Export plots
-    def _export_plots_jpg_1200(self):
+    # Exportar gráficos
+    def _export_plots_jpg_1200_legacy(self):
         folder = QFileDialog.getExistingDirectory(self, "Seleccionar carpeta destino")
         if not folder:
             return
@@ -1600,6 +1801,29 @@ class FBDApp(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Exportación", f"Error al exportar: {e}")
 
+    def _export_plots_jpg_1200(self):
+        folder = QFileDialog.getExistingDirectory(self, "Seleccionar carpeta destino")
+        if not folder:
+            return
+        try:
+            path_fbd = f"{folder}/FBD.jpg"
+            path_v = f"{folder}/V.jpg"
+            path_m = f"{folder}/M.jpg"
+            path_defl = f"{folder}/Deformada.jpg"
+
+            self._save_axis_snapshot(self.ax_fbd, path_fbd, dpi=1200)
+            self._save_axis_snapshot(self.ax_V, path_v, dpi=1200)
+            self._save_axis_snapshot(self.ax_M, path_m, dpi=1200)
+            self._save_axis_snapshot(self.ax_defl, path_defl, dpi=1200)
+
+            QMessageBox.information(
+                self,
+                "ExportaciÃ³n",
+                f"Exportado:\n- {path_fbd}\n- {path_v}\n- {path_m}\n- {path_defl}",
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "ExportaciÃ³n", f"Error al exportar: {e}")
+
     def _save_text_schematic(self, path: str, title: str, lines: List[str]):
         fig = plt.Figure(figsize=(8, 3.2))
         ax = fig.add_subplot(111)
@@ -1612,10 +1836,340 @@ class FBDApp(QMainWindow):
         fig.tight_layout()
         fig.savefig(path, dpi=300)
 
+    def _export_reactions_memoria_docx(self):
+        def _extremos_V(diag_obj, xlim_):
+            x, V, _ = diag_obj.sample(n_per_segment=220)
+            x = np.asarray(x, dtype=float)
+            V = np.asarray(V, dtype=float)
+            mask = (x >= xlim_[0]) & (x <= xlim_[1])
+            x = x[mask]
+            V = V[mask]
+            if x.size < 5:
+                return [], []
+            d = np.diff(V)
+            maxs = []
+            mins = []
+            for i in range(1, len(d)):
+                if d[i - 1] > 0 and d[i] <= 0:
+                    maxs.append((float(x[i]), float(V[i])))
+                if d[i - 1] < 0 and d[i] >= 0:
+                    mins.append((float(x[i]), float(V[i])))
+            return maxs, mins
+
+        def _to_float_or_none(value: Any) -> Optional[float]:
+            try:
+                text = str(value or "").strip().replace(",", ".")
+                return None if text == "" else float(text)
+            except Exception:
+                return None
+
+        tab = self.tab_reactions
+        try:
+            tab.recompute_now()
+            loads, load_errors, _ = tab._build_loads()
+            errors = tab._validate_geometry() + load_errors
+            if errors:
+                head = "No se puede exportar DOCX: hay datos requeridos incompletos.\n"
+                body = "\n".join([f"- {e}" for e in errors[:12]])
+                if len(errors) > 12:
+                    body += f"\n- ... y {len(errors) - 12} más."
+                QMessageBox.warning(self, "Validación de entradas", head + body)
+                return
+
+            state = tab.current_plot_state()
+            reaction_result = tab._last_result
+            if state is None or reaction_result is None:
+                raise ValueError("No hay una solución estructural disponible para exportar.")
+
+            self._plot_reactions_tab(tab)
+            diag = tab.get_diag()
+            xlim = _compute_x_view(state.beam.L_mm, state.point_forces, state.dist_loads, state.moments)
+            if diag is None:
+                diag = build_V_M(
+                    beam_L_mm=state.beam.L_mm,
+                    point_forces=state.point_forces,
+                    dist_loads=state.dist_loads,
+                    moments=state.moments,
+                    x_start=xlim[0],
+                    x_end=xlim[1],
+                )
+
+            maxM, minM = self._find_local_extrema_kgcm(diag, xlim)
+            maxV, minV = _extremos_V(diag, xlim)
+            all_abs = [(x, abs(v)) for x, v in maxM] + [(x, abs(v)) for x, v in minM]
+            if all_abs:
+                mmax_x_mm, mmax_kgcm = max(all_abs, key=lambda kv: kv[1])
+            else:
+                mmax_x_mm, mmax_kgcm = 0.0, 0.0
+
+            unidad_titulo = "Cálculo y verificación"
+            default_name = f"Memoria - {unidad_titulo} - {datetime.now().strftime('%Y%m%d')}.docx"
+            path, _ = QFileDialog.getSaveFileName(self, "Exportar memoria de cálculo", default_name, "Word (*.docx)")
+            if not path:
+                return
+            if not path.lower().endswith(".docx"):
+                path += ".docx"
+
+            tmpdir = tempfile.mkdtemp(prefix="semi_beam_docx_")
+            try:
+                defl_payload = None
+                if tab.deflection_enabled():
+                    defl_payload = self._compute_deflection_result(
+                        diag=diag,
+                        beam_L_mm=state.beam.L_mm,
+                        supports=tab.deflection_supports(),
+                        params=tab.deflection_params(),
+                        section_panel=tab.section_panel,
+                    )
+
+                path_fbd = os.path.join(tmpdir, "FBD.jpg")
+                self._save_axis_snapshot(self.ax_fbd, path_fbd)
+                path_v = os.path.join(tmpdir, "V.jpg")
+                self._save_axis_snapshot(self.ax_V, path_v)
+                path_m = os.path.join(tmpdir, "M.jpg")
+                self._save_axis_snapshot(self.ax_M, path_m)
+                path_deflection = ""
+                if tab.deflection_enabled() and defl_payload is not None:
+                    path_deflection = os.path.join(tmpdir, "Deflection.jpg")
+                    self._save_axis_snapshot(self.ax_defl, path_deflection)
+
+                try:
+                    tab.section_panel.tbl.clearFocus()
+                    tab.section_panel.set_moment_provider(lambda x_mm: float(diag.eval_M(float(x_mm))) / 10.0)
+                    tab.section_panel.set_shear_provider(lambda x_mm: float(diag.eval_V(float(x_mm))))
+                    if defl_payload is not None:
+                        defl_result, i_source = defl_payload
+                        tab.section_panel.set_deflection_context(defl_result, i_source=i_source)
+                    else:
+                        tab.section_panel.set_deflection_context(None)
+                    tab.section_panel.clear_results_only()
+                    tab.section_panel._recompute_all()
+                except Exception:
+                    pass
+                verification = tab.section_panel.build_verification_export_payload(tmpdir, dpi=300)
+
+                path_sec = os.path.join(tmpdir, "Secciones.jpg")
+                try:
+                    tab.section_panel.export_table_jpg(path_sec, dpi=MEMORIA_EXPORT_IMAGE_DPI)
+                except Exception:
+                    path_sec = ""
+
+                sec_data = tab.section_panel.extract_memoria_data()
+                sec_rows = list(sec_data.get("rows", []))
+                sec_imgs: Dict[str, str] = {}
+                for i, sec_name in enumerate(["A-A'", "B-B'", "C-C'", "D-D'", "E-E'"]):
+                    pth = os.path.join(tmpdir, f"sec_{i + 1}.jpg")
+                    row = sec_rows[i] if i < len(sec_rows) else {}
+                    self._save_text_schematic(
+                        pth,
+                        f"Sección {sec_name}",
+                        [
+                            f"x = {row.get('x_mm', '-') or '-'} mm",
+                            f"h_web = {row.get('h_web_mm', '-') or '-'} mm",
+                            f"t_web = {row.get('t_web_in', '-') or '-'} in",
+                        ],
+                    )
+                    sec_imgs[f"sec_{chr(ord('a') + i)}"] = pth
+
+                if tab.mode.currentIndex() == 0:
+                    x_a = float(tab.x_a.value())
+                    x_b = float(tab.x_b.value())
+                    apoyos = [
+                        ("RA", f"x={_fmt_plain(x_a, 0)} mm; R={_fmt_plain(float(reaction_result.reacciones.get('R_A', 0.0)), 2)} kg (calculada)"),
+                        ("RB", f"x={_fmt_plain(x_b, 0)} mm; R={_fmt_plain(float(reaction_result.reacciones.get('R_B', 0.0)), 2)} kg (calculada)"),
+                    ]
+                    dist_perno_mm = x_a
+                    peso_eje1_kg = float(reaction_result.reacciones.get("R_A", 0.0))
+                    peso_eje2_kg = float(reaction_result.reacciones.get("R_B", 0.0))
+                    dist_eje1_mm = x_a
+                    dist_eje2_mm = x_b
+                    x_t_result = x_b
+                    x_d_result = None
+                    p_stab_long_lines = [
+                        f"x_A = {_fmt_plain(x_a, 0)} mm",
+                        f"x_B = {_fmt_plain(x_b, 0)} mm",
+                        f"ΣFy residual = {_fmt_plain(float(reaction_result.Fy_total_residual), 6)}",
+                    ]
+                else:
+                    x_k = float(tab.x_k.value())
+                    x_t = float(tab.x_t.value())
+                    x_d = x_t - float(tab.offset.value())
+                    apoyos = [
+                        ("Rk", f"x={_fmt_plain(x_k, 0)} mm; R={_fmt_plain(float(reaction_result.reacciones.get('R_k', 0.0)), 2)} kg (calculada)"),
+                        ("Rd", f"x={_fmt_plain(x_d, 0)} mm; R={_fmt_plain(float(reaction_result.reacciones.get('R_d', 0.0)), 2)} kg (calculada)"),
+                        ("Rt", f"x={_fmt_plain(x_t, 0)} mm; R={_fmt_plain(float(reaction_result.reacciones.get('R_t', 0.0)), 2)} kg (calculada)"),
+                    ]
+                    dist_perno_mm = x_k
+                    peso_eje1_kg = float(reaction_result.reacciones.get("R_d", 0.0))
+                    peso_eje2_kg = float(reaction_result.reacciones.get("R_t", 0.0))
+                    dist_eje1_mm = x_d
+                    dist_eje2_mm = x_t
+                    x_t_result = x_t
+                    x_d_result = x_d
+                    p_stab_long_lines = [
+                        f"x_k = {_fmt_plain(x_k, 0)} mm",
+                        f"x_d = {_fmt_plain(x_d, 0)} mm",
+                        f"x_t = {_fmt_plain(x_t, 0)} mm",
+                    ]
+
+                p_stab_long = os.path.join(tmpdir, "stab_long.jpg")
+                self._save_text_schematic(p_stab_long, "Estabilidad longitudinal (esquema)", p_stab_long_lines)
+                p_stab_lat = os.path.join(tmpdir, "stab_lat.jpg")
+                self._save_text_schematic(
+                    p_stab_lat,
+                    "Estabilidad lateral (esquema)",
+                    [
+                        f"Modo estructural: {tab.mode.currentText()}",
+                        f"Cantidad de cargas ingresadas: {len(loads)}",
+                        f"ΣM0 residual = {_fmt_plain(float(reaction_result.M0_residual), 6)}",
+                    ],
+                )
+
+                cargas = []
+                for load in loads:
+                    if isinstance(load, PointForce):
+                        cargas.append((load.label, f"P: x={_fmt_plain(load.x_mm, 0)} mm; P={_fmt_plain(load.value_user, 2)} kg"))
+                    elif isinstance(load, DistUniform):
+                        cargas.append((load.label, f"q: x0={_fmt_plain(load.x0_mm, 0)} mm; L={_fmt_plain(load.Lq_mm, 0)} mm; q={_fmt_plain(load.q_user, 6)} kg/mm"))
+                    elif isinstance(load, PointMoment):
+                        cargas.append((load.label, f"M: x={_fmt_plain(load.x_mm, 0)} mm; M={_fmt_plain(load.M_user_kgmm, 2)} kg·mm"))
+
+                resultados = MemoriaResultados(
+                    q_user_kgmm=0.0,
+                    x_t_mm=float(x_t_result),
+                    x_d_mm=float(x_d_result) if x_d_result is not None else None,
+                    residual_Fy=float(reaction_result.Fy_total_residual),
+                    residual_M0=float(reaction_result.M0_residual),
+                    extremos_V=[("MAX", float(x), float(v)) for x, v in maxV] + [("MIN", float(x), float(v)) for x, v in minV],
+                    extremos_M=[("MAX", float(x), float(v)) for x, v in maxM] + [("MIN", float(x), float(v)) for x, v in minM],
+                )
+                if defl_payload is not None:
+                    defl_result, i_source = defl_payload
+                    resultados = MemoriaResultados(
+                        q_user_kgmm=0.0,
+                        x_t_mm=float(x_t_result),
+                        x_d_mm=float(x_d_result) if x_d_result is not None else None,
+                        residual_Fy=float(reaction_result.Fy_total_residual),
+                        residual_M0=float(reaction_result.M0_residual),
+                        extremos_V=[("MAX", float(x), float(v)) for x, v in maxV] + [("MIN", float(x), float(v)) for x, v in minV],
+                        extremos_M=[("MAX", float(x), float(v)) for x, v in maxM] + [("MIN", float(x), float(v)) for x, v in minM],
+                        vmin_mm=float(defl_result.vmin_mm),
+                        x_vmin_mm=float(defl_result.x_vmin_mm),
+                        utilized_mm=float(defl_result.utilized_mm),
+                        allowable_mm=float(defl_result.allowable_mm),
+                        deflection_ok=bool(defl_result.ok),
+                        i_source=str(i_source),
+                    )
+
+                caso = MemoriaCaso(
+                    unidad=unidad_titulo,
+                    L_carrozable_mm=float(state.beam.L_mm),
+                    L_viga_total_mm=float(state.beam.L_mm),
+                    descripcion_config=tab.mode.currentText(),
+                    apoyos=apoyos,
+                    cargas=cargas,
+                )
+
+                fs_vals: List[float] = []
+                flex_rows = []
+                for row in sec_rows:
+                    fs = _to_float_or_none(row.get("FS"))
+                    if fs is not None:
+                        fs_vals.append(fs)
+                    flex_rows.append(
+                        {
+                            "sec": row.get("sec", ""),
+                            "M_kgcm": _to_float_or_none(row.get("M_kgcm")) or 0.0,
+                            "sigma_max": _to_float_or_none(row.get("sigma_max")) or 0.0,
+                            "Wreq_cm3": _to_float_or_none(row.get("Wreq_cm3")) or 0.0,
+                            "Wcrit_cm3": _to_float_or_none(row.get("Wcrit_cm3")) or 0.0,
+                            "FS": _to_float_or_none(row.get("FS")) or 0.0,
+                        }
+                    )
+
+                sigma_candidates = [
+                    _to_float_or_none(sec_data.get("sigma_top_kgcm2")),
+                    _to_float_or_none(sec_data.get("sigma_bot_kgcm2")),
+                    _to_float_or_none(sec_data.get("sigma_web_kgcm2")),
+                ]
+                sigma_candidates = [sigma for sigma in sigma_candidates if sigma is not None]
+                fy_kgcm2 = min(sigma_candidates) if sigma_candidates else 0.0
+
+                seccion = MemoriaSeccion(
+                    materiales=[
+                        ("Planchuela sup", f"{sec_data.get('material_top', '')} / σadm={sec_data.get('sigma_top_kgcm2', '-')}"),
+                        ("Planchuela inf", f"{sec_data.get('material_bot', '')} / σadm={sec_data.get('sigma_bot_kgcm2', '-')}"),
+                        ("Alma", f"{sec_data.get('material_web', '')} / σadm={sec_data.get('sigma_web_kgcm2', '-')}"),
+                    ],
+                    fs_min=float(sec_data.get("fs_min") or 0.0),
+                    n_vigas=int(sec_data.get("n_beams") or 2),
+                    parametros=[],
+                    tabla=[],
+                )
+
+                dlg = MemoriaHeaderDialog(self, defaults=dict(tab.memoria_header or {}))
+                if dlg.exec() != QDialog.DialogCode.Accepted:
+                    return
+                hdr = dlg.values_dict()
+                tab.memoria_header = hdr
+
+                header = MemoriaHeader(
+                    titulo=f"Memoria de Cálculo — {unidad_titulo}",
+                    cliente_proyecto=" - ".join([x for x in [hdr.get("cliente", ""), hdr.get("proyecto", "")] if x]).strip(),
+                    autor=hdr.get("autor", ""),
+                    fecha=datetime.now(),
+                    revision=hdr.get("revision", "A"),
+                )
+
+                imgs = {
+                    "fbd": path_fbd,
+                    "v": path_v,
+                    "m": path_m,
+                    "deflection": path_deflection,
+                    "secciones": path_sec if path_sec else "",
+                    **sec_imgs,
+                    "stab_long": p_stab_long,
+                    "stab_lat": p_stab_lat,
+                }
+                extras = {
+                    "dist_perno_mm": dist_perno_mm,
+                    "peso_eje1_kg": peso_eje1_kg,
+                    "peso_eje2_kg": peso_eje2_kg,
+                    "dist_eje1_mm": dist_eje1_mm,
+                    "dist_eje2_mm": dist_eje2_mm,
+                    "mmax_kgcm": float(mmax_kgcm),
+                    "mmax_x_mm": float(mmax_x_mm),
+                    "alas": f"{sec_data.get('material_top', '')} / {sec_data.get('material_bot', '')}",
+                    "alma": str(sec_data.get("material_web", "")),
+                    "fy_kgcm2": float(fy_kgcm2),
+                    "fs_min_real": min(fs_vals) if fs_vals else 0.0,
+                    "flex_rows": flex_rows[:5],
+                }
+
+                export_memoria_docx(
+                    path,
+                    header=header,
+                    caso=caso,
+                    resultados=resultados,
+                    seccion=seccion,
+                    imagenes=imgs,
+                    extras=extras,
+                    verification=verification,
+                )
+                QMessageBox.information(self, "Memoria de cálculo", f"DOCX generado:\n{path}")
+            finally:
+                try:
+                    import shutil
+                    shutil.rmtree(tmpdir, ignore_errors=True)
+                except Exception:
+                    pass
+        except Exception as e:
+            QMessageBox.critical(self, "Memoria de cálculo", f"Error al generar DOCX: {e}")
+
     def _export_memoria_docx(self):
         tab = self.active_tab()
         if tab is self.tab_reactions:
-            QMessageBox.information(self, "Memoria DOCX", "La pestaña Semirremolque - Reacciones no exporta memoria DOCX.")
+            self._export_reactions_memoria_docx()
             return
         try:
             errors = tab._validate_required_inputs()
@@ -1686,7 +2240,7 @@ class FBDApp(QMainWindow):
                 mmax_x_mm, mmax_kgcm = 0.0, 0.0
 
             default_name = f"Memoria - {tab.title} - {datetime.now().strftime('%Y%m%d')}.docx"
-            path, _ = QFileDialog.getSaveFileName(self, "Exportar Memoria (DOCX)", default_name, "Word (*.docx)")
+            path, _ = QFileDialog.getSaveFileName(self, "Exportar memoria de cálculo", default_name, "Word (*.docx)")
             if not path:
                 return
             if not path.lower().endswith(".docx"):
@@ -1694,20 +2248,44 @@ class FBDApp(QMainWindow):
 
             tmpdir = tempfile.mkdtemp(prefix="semi_beam_docx_")
             try:
-                self.canvas.draw()
-                fig = self.fig
-                renderer = fig.canvas.get_renderer()
-
+                defl_payload = None
+                if tab.deflection_enabled():
+                    defl_payload = self._compute_deflection_result(
+                        diag=diag,
+                        beam_L_mm=beam_plot.L_mm,
+                        supports=tab.deflection_supports(),
+                        params=tab.deflection_params(),
+                        section_panel=tab.section_panel,
+                    )
                 path_fbd = os.path.join(tmpdir, "FBD.jpg")
-                fig.savefig(path_fbd, dpi=300, bbox_inches=self.ax_fbd.get_tightbbox(renderer).transformed(fig.dpi_scale_trans.inverted()))
+                self._save_axis_snapshot(self.ax_fbd, path_fbd)
                 path_v = os.path.join(tmpdir, "V.jpg")
-                fig.savefig(path_v, dpi=300, bbox_inches=self.ax_V.get_tightbbox(renderer).transformed(fig.dpi_scale_trans.inverted()))
+                self._save_axis_snapshot(self.ax_V, path_v)
                 path_m = os.path.join(tmpdir, "M.jpg")
-                fig.savefig(path_m, dpi=300, bbox_inches=self.ax_M.get_tightbbox(renderer).transformed(fig.dpi_scale_trans.inverted()))
+                self._save_axis_snapshot(self.ax_M, path_m)
+                path_deflection = ""
+                if tab.deflection_enabled() and defl_payload is not None:
+                    path_deflection = os.path.join(tmpdir, "Deflection.jpg")
+                    self._save_axis_snapshot(self.ax_defl, path_deflection)
+
+                try:
+                    tab.section_panel.tbl.clearFocus()
+                    tab.section_panel.set_moment_provider(lambda x_mm: float(diag.eval_M(float(x_mm))) / 10.0)
+                    tab.section_panel.set_shear_provider(lambda x_mm: float(diag.eval_V(float(x_mm))))
+                    if defl_payload is not None:
+                        defl_result, i_source = defl_payload
+                        tab.section_panel.set_deflection_context(defl_result, i_source=i_source)
+                    else:
+                        tab.section_panel.set_deflection_context(None)
+                    tab.section_panel.clear_results_only()
+                    tab.section_panel._recompute_all()
+                except Exception:
+                    pass
+                verification = tab.section_panel.build_verification_export_payload(tmpdir, dpi=300)
 
                 path_sec = os.path.join(tmpdir, "Secciones.jpg")
                 try:
-                    tab.section_panel.export_table_jpg(path_sec, dpi=300)
+                    tab.section_panel.export_table_jpg(path_sec, dpi=MEMORIA_EXPORT_IMAGE_DPI)
                 except Exception:
                     path_sec = ""
 
@@ -1775,6 +2353,23 @@ class FBDApp(QMainWindow):
                     extremos_V=[],
                     extremos_M=[("MAX", float(x), float(v)) for x, v in maxM] + [("MIN", float(x), float(v)) for x, v in minM],
                 )
+                if defl_payload is not None:
+                    defl_result, i_source = defl_payload
+                    resultados = MemoriaResultados(
+                        q_user_kgmm=float(res.q_user_kg_per_mm),
+                        x_t_mm=float(res.x_t_mm),
+                        x_d_mm=float(res.x_d_mm) if res.x_d_mm is not None else None,
+                        residual_Fy=float(res.residual_Fy),
+                        residual_M0=float(res.residual_M0),
+                        extremos_V=[],
+                        extremos_M=[("MAX", float(x), float(v)) for x, v in maxM] + [("MIN", float(x), float(v)) for x, v in minM],
+                        vmin_mm=float(defl_result.vmin_mm),
+                        x_vmin_mm=float(defl_result.x_vmin_mm),
+                        utilized_mm=float(defl_result.utilized_mm),
+                        allowable_mm=float(defl_result.allowable_mm),
+                        deflection_ok=bool(defl_result.ok),
+                        i_source=str(i_source),
+                    )
                 caso = MemoriaCaso(
                     unidad=tab.title,
                     L_carrozable_mm=float(Lc),
@@ -1854,6 +2449,7 @@ class FBDApp(QMainWindow):
                     "fbd": path_fbd,
                     "v": path_v,
                     "m": path_m,
+                    "deflection": path_deflection,
                     "secciones": path_sec if path_sec else "",
                     **sec_imgs,
                     "stab_long": p_stab_long,
@@ -1877,18 +2473,17 @@ class FBDApp(QMainWindow):
                     "flex_rows": flex_rows[:5],
                 }
 
-                template_path = ensure_memoria_template(default_template_path())
                 export_memoria_docx(
                     path,
-                    template_path=template_path,
                     header=header,
                     caso=caso,
                     resultados=resultados,
                     seccion=seccion,
                     imagenes=imgs,
                     extras=extras,
+                    verification=verification,
                 )
-                QMessageBox.information(self, "Memoria DOCX", f"DOCX generado:\n{path}")
+                QMessageBox.information(self, "Memoria de cálculo", f"DOCX generado:\n{path}")
             finally:
                 try:
                     import shutil
@@ -1896,460 +2491,12 @@ class FBDApp(QMainWindow):
                 except Exception:
                     pass
         except Exception as e:
-            QMessageBox.critical(self, "Memoria DOCX", f"Error al generar DOCX: {e}")
-
-    def _export_memoria_pdf(self):
-        """Exporta una Memoria de Cálculo en PDF (A4) con base teórica + resultados + figuras."""
-        tab = self.active_tab()
-        if tab is self.tab_reactions:
-            QMessageBox.information(self, "Memoria PDF", "La pestaña Semirremolque - Reacciones no exporta memoria PDF.")
-            return
-
-        try:
-            errors = tab._validate_required_inputs()
-            if errors:
-                head = "No se puede exportar PDF: hay datos requeridos incompletos.\n"
-                body = "\n".join([f"- {e}" for e in errors[:12]])
-                if len(errors) > 12:
-                    body += f"\n- ... y {len(errors) - 12} más."
-                QMessageBox.warning(self, "Validación de entradas", head + body)
-                return
-
-            config_txt = tab.cmb_config.currentText()
-            if config_txt == "":
-                raise ValueError("Configuración vacía.")
-
-            Lc = float(_spin_value_or_none(tab.Lc))
-            beam_motor = Beam(L_mm=Lc)
-
-            # Cargas puntuales (P) - usuario
-            pforces: List[PointForce] = []
-            point_forces_user = []
-            for r in range(tab.tbl_points.rowCount()):
-                lab = _get_text(tab.tbl_points, r, 0).strip()
-                x = _try_float(_get_text(tab.tbl_points, r, 1))
-                v = _try_float(_get_text(tab.tbl_points, r, 2))
-                if lab and x is not None and v is not None:
-                    pforces.append(PointForce(label=lab, x_mm=x, value_user=v))
-                    point_forces_user.append((lab, float(x), float(v)))
-
-            # Distribuidas conocidas - usuario
-            dloads: List[DistUniform] = []
-            dist_loads_user = []
-            for r in range(tab.tbl_dists.rowCount()):
-                lab = _get_text(tab.tbl_dists, r, 0).strip()
-                x0 = _try_float(_get_text(tab.tbl_dists, r, 1))
-                Lq = _try_float(_get_text(tab.tbl_dists, r, 2))
-                q = _try_float(_get_text(tab.tbl_dists, r, 3))
-                if lab and x0 is not None and Lq is not None and q is not None:
-                    dloads.append(DistUniform(label=lab, x0_mm=x0, Lq_mm=Lq, q_user=q))
-                    dist_loads_user.append((lab, float(x0), float(Lq), float(q)))
-
-            # Momentos puntuales - usuario
-            moms: List[PointMoment] = []
-            point_moments_user = []
-            for r in range(tab.tbl_moms.rowCount()):
-                lab = _get_text(tab.tbl_moms, r, 0).strip()
-                x = _try_float(_get_text(tab.tbl_moms, r, 1))
-                m = _try_float(_get_text(tab.tbl_moms, r, 2))
-                if lab and x is not None and m is not None:
-                    moms.append(PointMoment(label=lab, x_mm=x, M_user_kgmm=m))
-                    point_moments_user.append((lab, float(x), float(m)))
-
-            # Apoyos
-            kingpin = FixedSupport(
-                label="Rp1",
-                x_mm=float(_spin_value_or_none(tab.x_front_or_kp)),
-                reaction_user=float(_spin_value_or_none(tab.R_front_or_kp))
-            )
-
-            tandem = TandemSupport(
-                label="Rt",
-                reaction_user=float(_spin_value_or_none(tab.Rt)),
-            )
-
-            directional = None
-            if tab._config_uses_directional():
-                directional = DirectionalSupport(
-                    label="Rd",
-                    reaction_user=float(_spin_value_or_none(tab.Rd)),
-                    offset_mm=float(_spin_value_or_none(tab.dir_offset)),
-                )
-
-            hitch = None
-            x_rp2_abs = None
-            if tab.is_bitren:
-                x_rp2_abs = Lc + float(_spin_value_or_none(tab.x_rp2_rel))
-                hitch = FixedSupport(label="Rp2", x_mm=x_rp2_abs, reaction_user=float(_spin_value_or_none(tab.Rp2)))
-
-            unknown_q = UnknownUniformLoad(label="q", span_start_mm=0.0, span_len_mm=Lc)
-
-            case = BeamCase(
-                beam=beam_motor,
-                point_forces=pforces,
-                dist_loads=dloads,
-                moments=moms,
-                kingpin=kingpin,
-                hitch=hitch,
-                tandem=tandem,
-                directional=directional,
-                unknown_uniform=unknown_q,
-            )
-
-            # Resolver
-            res = solve_equilibrium(case)
-
-            if tab.is_bitren:
-                L_viga_total = float(res.x_t_mm) + 2070.0
-            else:
-                L_viga_total = float(Lc)
-
-            beam_plot = Beam(L_mm=L_viga_total)
-
-            cache = tab.get_cache()
-            if cache is None:
-                cache = SessionCache(beam_plot=beam_plot, points=[], dists=[], moms=[], note_text="")
-                tab.set_cache(cache)
-
-            # Diagramas
-            solved_points = res.solved_point_forces
-            solved_dists = res.solved_dist_loads
-            solved_moms = res.solved_moments
-
-            xlim = _compute_x_view(beam_plot.L_mm, solved_points, solved_dists, solved_moms)
-            diag = build_V_M(
-                beam_L_mm=beam_plot.L_mm,
-                point_forces=solved_points,
-                dist_loads=solved_dists,
-                moments=solved_moms,
-                x_start=xlim[0],
-                x_end=xlim[1],
-            )
-
-            maxM, minM = self._find_local_extrema_kgcm(diag, xlim)
-
-            def _extremos_V(diag_, xlim_):
-                import numpy as np
-                x, V, _ = diag_.sample(n_per_segment=220)
-                x = np.asarray(x, dtype=float)
-                V = np.asarray(V, dtype=float)
-                mask = (x >= xlim_[0]) & (x <= xlim_[1])
-                x = x[mask]; V = V[mask]
-                if x.size < 5:
-                    return [], []
-                d = np.diff(V)
-                maxs = []
-                mins = []
-                for i in range(1, len(d)):
-                    if d[i-1] > 0 and d[i] <= 0:
-                        maxs.append((float(x[i]), float(V[i])))
-                    if d[i-1] < 0 and d[i] >= 0:
-                        mins.append((float(x[i]), float(V[i])))
-                return maxs, mins
-
-            maxV, minV = _extremos_V(diag, xlim)
-
-            # Guardar PDF
-            default_name = f"Memoria_calculo_{tab.title.replace(' ', '_')}.pdf"
-            path, _ = QFileDialog.getSaveFileName(self, "Exportar Memoria de Cálculo (PDF)", default_name, "PDF (*.pdf)")
-            if not path:
-                return
-            if not path.lower().endswith(".pdf"):
-                path += ".pdf"
-
-            # Imágenes temporales (desde los ejes actuales)
-            tmpdir = tempfile.mkdtemp(prefix="semi_beam_memoria_")
-            try:
-                fig = self.fig
-                renderer = fig.canvas.get_renderer()
-
-                path_fbd = os.path.join(tmpdir, "FBD.jpg")
-                fig.savefig(path_fbd, dpi=300, bbox_inches=self.ax_fbd.get_tightbbox(renderer).transformed(fig.dpi_scale_trans.inverted()))
-
-                path_v = os.path.join(tmpdir, "V.jpg")
-                fig.savefig(path_v, dpi=300, bbox_inches=self.ax_V.get_tightbbox(renderer).transformed(fig.dpi_scale_trans.inverted()))
-
-                path_m = os.path.join(tmpdir, "M.jpg")
-                fig.savefig(path_m, dpi=300, bbox_inches=self.ax_M.get_tightbbox(renderer).transformed(fig.dpi_scale_trans.inverted()))
-
-                # Sincronizar verificación de sección con el diagrama recién resuelto.
-                try:
-                    tab.section_panel.tbl.clearFocus()
-                    tab.section_panel.set_moment_provider(lambda x_mm: float(diag.eval_M(float(x_mm))) / 10.0)
-                    tab.section_panel.clear_results_only()
-                    tab.section_panel._recompute_all()
-                except Exception:
-                    pass
-
-                path_sec = os.path.join(tmpdir, "Secciones.jpg")
-                try:
-                    tab.section_panel.export_table_jpg(path_sec, dpi=300)
-                except Exception:
-                    path_sec = ""
-
-                # Apoyos y cargas (texto)
-                apoyos = []
-                apoyos.append(("Rp1", f"x={_fmt_plain(case.kingpin.x_mm, 0)} mm; R={_fmt_plain(case.kingpin.reaction_user, 2)} kg (usuario)"))
-                if case.hitch is not None:
-                    apoyos.append(("Rp2", f"x={_fmt_plain(case.hitch.x_mm, 0)} mm; R={_fmt_plain(case.hitch.reaction_user, 2)} kg (usuario)"))
-                apoyos.append(("Rt", f"x∈[{_fmt_plain(case.tandem.x_min_mm, 0)}, {_fmt_plain(case.tandem.x_max_mm, 0)}] mm; R={_fmt_plain(case.tandem.reaction_user, 2)} kg (usuario)"))
-                if case.directional is not None:
-                    apoyos.append(("Rd", f"offset={_fmt_plain(case.directional.offset_mm, 0)} mm; R={_fmt_plain(case.directional.reaction_user, 2)} kg (usuario)"))
-
-                cargas = []
-                for pf in case.point_forces:
-                    cargas.append((pf.label, f"P: x={_fmt_plain(pf.x_mm, 0)} mm; P={_fmt_plain(pf.value_user, 2)} kg (usuario, down+)"))
-                for dl in case.dist_loads:
-                    cargas.append((dl.label, f"q: x0={_fmt_plain(dl.x0_mm, 0)} mm; L={_fmt_plain(dl.Lq_mm, 0)} mm; q={_fmt_plain(dl.q_user, 6)} kg/mm (usuario, down+)"))
-                for pm in case.moments:
-                    # ✅ FIX: PointMoment no tiene value_user; es M_user_kgmm
-                    cargas.append((pm.label, f"M: x={_fmt_plain(pm.x_mm, 0)} mm; M={_fmt_plain(pm.M_user_kgmm, 2)} kg·mm (usuario)"))
-                cargas.append(("q (resuelta)", f"Tramo [0, {_fmt_plain(Lc,0)}] mm; q={_fmt_plain(res.q_user_kg_per_mm, 6)} kg/mm (usuario, down+)"))
-
-                extremos_V = [("MAX", x, v) for x, v in maxV] + [("MIN", x, v) for x, v in minV]
-                extremos_M = [("MAX", x, m) for x, m in maxM] + [("MIN", x, m) for x, m in minM]
-
-                # Header UI
-                dlg = MemoriaHeaderDialog(self, defaults=cache.memoria_header if cache else {})
-                if dlg.exec() != QDialog.DialogCode.Accepted:
-                    return
-                hdr = dlg.values_dict()
-                if cache:
-                    cache.memoria_header = hdr
-
-                # ----------------------------
-                # Construir MemoriaHeader tolerante
-                # ----------------------------
-                h_fields = _dc_field_names(MemoriaHeader)
-                header_data: Dict[str, Any] = {
-                    "titulo": f"Memoria de Cálculo — {tab.title}",
-                    "autor": hdr.get("autor", ""),
-                    "revision": hdr.get("revision", "A"),
-                }
-                # Variantes: (cliente, proyecto) vs cliente_proyecto
-                cliente = (hdr.get("cliente", "") or "").strip()
-                proyecto = (hdr.get("proyecto", "") or "").strip()
-                extra_linea = (hdr.get("extra_linea", "") or "").strip()
-                if "cliente_proyecto" in h_fields:
-                    cp = " - ".join([x for x in [cliente, proyecto] if x]) if (cliente or proyecto) else ""
-                    if extra_linea:
-                        cp = (cp + " | " + extra_linea).strip(" |")
-                    header_data["cliente_proyecto"] = cp
-                else:
-                    # si existen campos separados, pásalos
-                    if "cliente" in h_fields:
-                        header_data["cliente"] = cliente
-                    if "proyecto" in h_fields:
-                        header_data["proyecto"] = proyecto
-                    if "extra_linea" in h_fields:
-                        header_data["extra_linea"] = extra_linea
-
-                # fecha opcional
-                if "fecha" in h_fields:
-                    header_data["fecha"] = datetime.now()
-
-                header = _dc_make(MemoriaHeader, header_data)
-
-                # ----------------------------
-                # Construir MemoriaCaso tolerante
-                # ----------------------------
-                c_fields = _dc_field_names(MemoriaCaso)
-                if "unidad" in c_fields:
-                    caso = MemoriaCaso(
-                        unidad=tab.title,
-                        L_carrozable_mm=float(Lc),
-                        L_viga_total_mm=float(L_viga_total),
-                        descripcion_config=config_txt,
-                        apoyos=apoyos,
-                        cargas=cargas,
-                    )
-                else:
-                    # variante alternativa (si existiera)
-                    caso_alt = {
-                        "configuracion": tab.title,
-                        "Lc_mm": float(Lc),
-                        "L_total_mm": float(L_viga_total),
-                        "point_forces": point_forces_user,
-                        "dist_loads": dist_loads_user,
-                        "point_moments": point_moments_user,
-                        "descripcion_config": config_txt,
-                        "apoyos": apoyos,
-                        "cargas": cargas,
-                        "unidad": tab.title,
-                        "L_carrozable_mm": float(Lc),
-                        "L_viga_total_mm": float(L_viga_total),
-                    }
-                    caso = _dc_make(MemoriaCaso, caso_alt)
-
-                # ----------------------------
-                # Construir MemoriaResultados tolerante
-                # ----------------------------
-                r_fields = _dc_field_names(MemoriaResultados)
-                resultados_data = {
-                    "q_user_kgmm": float(res.q_user_kg_per_mm),
-                    "x_t_mm": float(res.x_t_mm) if res.x_t_mm is not None else 0.0,
-                    "x_d_mm": float(res.x_d_mm) if res.x_d_mm is not None else None,
-                    "residual_Fy": float(res.residual_Fy),
-                    "residual_M0": float(res.residual_M0),
-                    "extremos_V": extremos_V,
-                    "extremos_M": extremos_M,
-                    "extremes_V": extremos_V,
-                    "extremes_M": extremos_M,
-                }
-                resultados = _dc_make(MemoriaResultados, resultados_data)
-
-                # ----------------------------
-                # Construir MemoriaSeccion tolerante
-                # ----------------------------
-                sec_data = tab.section_panel.extract_memoria_data()
-                sec_rows = [
-                    r for r in sec_data.get("rows", [])
-                    if any(str(r.get(k, "") or "").strip() for k in (
-                        "x_mm", "h_web_mm", "M_kgcm", "FS", "Jx_cm4", "Wcrit_cm3", "Wreq_cm3", "sigma_max"
-                    ))
-                ]
-
-                s_fields = _dc_field_names(MemoriaSeccion)
-                seccion_obj = None
-                if s_fields:
-                    if "materiales" in s_fields:
-                        seccion_obj = MemoriaSeccion(
-                            materiales=[
-                                ("Planchuela sup", f"{sec_data.get('material_top','')} / σadm={sec_data.get('sigma_top_kgcm2','')}"),
-                                ("Planchuela inf", f"{sec_data.get('material_bot','')} / σadm={sec_data.get('sigma_bot_kgcm2','')}"),
-                                ("Alma", f"{sec_data.get('material_web','')} / σadm={sec_data.get('sigma_web_kgcm2','')}"),
-                            ],
-                            fs_min=float(sec_data.get("fs_min") or 0.0),
-                            n_vigas=int(sec_data.get("n_beams") or 2),
-                            parametros=[
-                                ("t_top [in]", str(sec_data.get("t_top_in",""))),
-                                ("t_bot [in]", str(sec_data.get("t_bot_in",""))),
-                                ("b_f", str(sec_data.get("bf_text",""))),
-                            ],
-                            tabla=[
-                                ["Sec", "x", "h_web", "t_web", "M", "FS", "Jx", "ybar", "cmax", "Wcrit", "Wreq", "σmax"],
-                                *[
-                                    [
-                                        r.get("sec",""),
-                                        r.get("x_mm",""),
-                                        r.get("h_web_mm",""),
-                                        r.get("t_web_in",""),
-                                        r.get("M_kgcm",""),
-                                        r.get("FS",""),
-                                        r.get("Jx_cm4",""),
-                                        r.get("ybar_cm",""),
-                                        r.get("cmax_cm",""),
-                                        r.get("Wcrit_cm3",""),
-                                        r.get("Wreq_cm3",""),
-                                        r.get("sigma_max",""),
-                                    ]
-                                    for r in sec_rows
-                                ]
-                            ],
-                        )
-                    else:
-                        # otra variante posible: material consolidado + sigma + imagen tabla
-                        mat_top = str(sec_data.get("material_top", "")).strip()
-                        mat_bot = str(sec_data.get("material_bot", "")).strip()
-                        mat_web = str(sec_data.get("material_web", "")).strip()
-                        material_txt = " / ".join([m for m in [mat_top, mat_bot, mat_web] if m]) or "—"
-
-                        def _to_float_or_none(v):
-                            if v is None:
-                                return None
-                            try:
-                                s = str(v).strip()
-                                if s == "":
-                                    return None
-                                return float(s)
-                            except Exception:
-                                return None
-
-                        sigmas = [
-                            _to_float_or_none(sec_data.get("sigma_top_kgcm2")),
-                            _to_float_or_none(sec_data.get("sigma_bot_kgcm2")),
-                            _to_float_or_none(sec_data.get("sigma_web_kgcm2")),
-                        ]
-                        sigmas = [s for s in sigmas if s is not None]
-                        sigma_adm = min(sigmas) if sigmas else None
-
-                        tabla_img_path = None
-                        try:
-                            tabla_img_path = os.path.join(tempfile.gettempdir(), f"memoria_seccion_{tab.title}.jpg")
-                            tab.section_panel.export_table_jpg(tabla_img_path, dpi=300)
-                        except Exception:
-                            tabla_img_path = None
-
-                        seccion_obj = _dc_make(MemoriaSeccion, {
-                            "material": material_txt,
-                            "sigma_adm_kgcm2": sigma_adm,
-                            "n_vigas": int(sec_data.get("n_beams", 2) or 2),
-                            "fs_min": _to_float_or_none(sec_data.get("fs_min")),
-                            "tabla_imagen_path": tabla_img_path,
-                        })
-
-                # ----------------------------
-                # Exportar PDF (tolerante a firma del exportador)
-                # ----------------------------
-                imgs = {
-                    "fbd": path_fbd,
-                    "v": path_v,
-                    "m": path_m,
-                    "secciones": path_sec if path_sec else "",
-                }
-
-                try:
-                    export_memoria_pdf(
-                        path,
-                        header=header,
-                        caso=caso,
-                        resultados=resultados,
-                        seccion=seccion_obj,
-                        imagenes=imgs,
-                    )
-                except TypeError:
-                    try:
-                        export_memoria_pdf(
-                            path,
-                            header=header,
-                            caso=caso,
-                            resultados=resultados,
-                            seccion=seccion_obj,
-                            images=imgs,  # posible variante
-                        )
-                    except TypeError:
-                        try:
-                            # posible variante posicional
-                            export_memoria_pdf(path, header, caso, resultados, seccion_obj, imgs)
-                        except TypeError:
-                            # último recurso: sin imágenes
-                            export_memoria_pdf(path, header=header, caso=caso, resultados=resultados, seccion=seccion_obj)
-
-                QMessageBox.information(self, "Memoria de cálculo", f"PDF generado:\n{path}")
-
-            finally:
-                try:
-                    import shutil
-                    shutil.rmtree(tmpdir, ignore_errors=True)
-                except Exception:
-                    pass
-
-        except Exception as e:
-            import logging
-            import traceback
-
-            logger = logging.getLogger("semi_beam")
-            try:
-                logger.error("Error al generar la memoria (PDF).\n%s", traceback.format_exc())
-            except Exception:
-                print(traceback.format_exc())
-
-            QMessageBox.critical(self, "Memoria de cálculo", f"Error al generar la memoria: {e}")
-
+            QMessageBox.critical(self, "Memoria de cálculo", f"Error al generar DOCX: {e}")
 
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName("calculeitor")
+    app.setApplicationVersion(APP_VERSION)
     try:
         app.setWindowIcon(QIcon(ensure_calculeitor_icon()))
     except Exception:

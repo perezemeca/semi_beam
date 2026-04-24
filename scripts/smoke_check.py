@@ -27,11 +27,14 @@ from semi_beam.engine.diagrams import build_V_M
 from semi_beam.view.renderer_fbd import render_fbd
 from semi_beam.view.renderer_vm import render_shear, render_moment
 from semi_beam.view.style import RenderStyle
-from semi_beam.services.memoria_calculo_pdf import (
-    MemoriaHeader, MemoriaCaso, MemoriaResultados, MemoriaSeccion
-)
 from semi_beam.services.memoria_calculo_docx import (
-    export_memoria_docx, ensure_memoria_template, default_template_path
+    export_memoria_docx,
+    ensure_memoria_template,
+    default_template_path,
+    MemoriaHeader,
+    MemoriaCaso,
+    MemoriaResultados,
+    MemoriaSeccion,
 )
 
 

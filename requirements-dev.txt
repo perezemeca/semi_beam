@@ -1,0 +1,7 @@
+-r requirements.txt
+
+# Pruebas
+pytest>=8.0
+
+# Armado del ejecutable
+pyinstaller>=6.0
