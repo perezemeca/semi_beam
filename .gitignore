@@ -11,6 +11,20 @@ pytest-cache-files-*/
 build/
 dist/
 .pytest_cache/
+
+# Office temporales
+~$*.docx
+~$*.xlsx
+~$*.pptx
+
+# CAD / pruebas locales no versionadas
+*.dxf
+
+# Salidas generadas por reportes/exportaciones
+*.tmp.docx
+Memoria - *.docx
+tabla_verificacion*.jpg
+
 Memoria_calculo_*.pdf
 Memoria - Calculo y verificacion - *.docx
 Memoria - Calculo y verificación - *.docx
