@@ -48,12 +48,24 @@ python -m semi_beam
 - Esquema de cuerpo libre para la viga.
 - Diagramas `V(x)` y `M(x)`.
 - Calculo de deformada.
+- Inspeccion interactiva de diagramas: permite consultar posicion `X` y magnitud local al pasar el mouse sobre `V(x)`, `M(x)` y deformada.
 - Resolucion de equilibrio con carga distribuida faltante y posicion de tandem.
 - Pestaña de calculo y verificacion de reacciones.
 - Verificador de seccion a flexion.
 - Guardado y carga de estudios `.sbeam`.
 - Exportacion de imagenes JPG.
 - Exportacion de memoria de calculo en DOCX.
+
+## Uso: inspeccion de diagramas
+
+Luego de resolver un caso, se puede mover el mouse sobre las curvas de `V(x)`, `M(x)` o deformada para consultar el valor local.
+
+- El marcador indica el punto de la curva inspeccionado.
+- La caja fija del eje activo muestra la posicion `X` y la magnitud local.
+- El esquema de cuerpo libre (FBD) no tiene inspeccion hover.
+- La inspeccion es solo visual: no modifica resultados de calculo ni datos del estudio.
+- El hover se oculta antes de exportar JPG o DOCX, por lo que no aparece en las imagenes generadas.
+- No requiere dependencias nuevas.
 
 ## Verificador de seccion
 
@@ -147,7 +159,7 @@ python -m pytest -q
 Estado esperado actual:
 
 ```text
-29 passed
+33 passed
 ```
 
 ## Empaquetado
@@ -200,12 +212,15 @@ Smoke check manual del EXE:
 - `scripts/prepare_release_assets.py`: genera icono y template si faltan.
 - `src/semi_beam/`: paquete principal.
 - `src/semi_beam/data/materials_kgcm2.txt`: base de materiales.
+- `src/semi_beam/view/diagram_hover.py`: inspeccion hover de diagramas Matplotlib en la capa `view`.
+- `src/semi_beam/view/renderer_vm.py`: render de `V(x)`, `M(x)` y deformada; expone `Line2D` para inspeccion sin alterar calculos.
+- `src/semi_beam/ui/main_window.py`: wiring de la UI principal y conexion del hover al canvas principal.
 - `src/semi_beam/services/memoria_calculo_docx.py`: exportador DOCX.
 - `calculeitor.spec`: configuracion de PyInstaller.
 
 ## Nota sobre README.txt
 
-`README.md` es la documentacion principal para GitHub. `README.txt` se conserva sin cambios por compatibilidad e historial del proyecto.
+`README.md` es la documentacion principal para GitHub. `README.txt` se conserva como guia breve por compatibilidad e historial del proyecto.
 
 ## Licencia
 

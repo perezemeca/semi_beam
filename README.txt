@@ -7,12 +7,21 @@ Aplicación de escritorio para cálculo estructural preliminar de vigas de carro
 
 Incluye:
 - Esquema de cuerpo libre y diagramas V(x), M(x) y deformada.
+- Inspección interactiva de V(x), M(x) y deformada con marcador local y caja fija de valores.
 - Resolución de equilibrio para q faltante y posición de tándem.
 - Pestaña "Cálculo y verificación" para reacciones de semirremolque y búsqueda de configuración.
 - Verificación de sección a flexión con materiales y tabla de secciones.
 - Guardado y carga de estudios `.sbeam`.
 - Exportación de imágenes JPG.
 - Exportación de memoria de cálculo en DOCX.
+
+Uso de inspección de diagramas:
+- Resolver un caso.
+- Mover el mouse sobre V(x), M(x) o deformada.
+- Leer la posición X y magnitud local en la caja fija del eje activo.
+- El FBD no tiene hover.
+- El hover no modifica cálculos y no aparece en exportaciones JPG/DOCX.
+- No requiere dependencias nuevas.
 
 Nota operativa:
 - El exportador principal genera DOCX. Si hace falta PDF, se puede convertir desde Word.
@@ -33,6 +42,9 @@ Estructura clave
 - `scripts/smoke_check.py` (prueba mínima sin abrir UI)
 - `scripts/prepare_release_assets.py` (genera icono/template si faltan)
 - `src/semi_beam/...` (paquete principal)
+- `src/semi_beam/view/diagram_hover.py` (interacción hover Matplotlib en la capa view)
+- `src/semi_beam/view/renderer_vm.py` (expone Line2D para inspección sin alterar cálculo)
+- `src/semi_beam/ui/main_window.py` (wiring de la UI principal)
 - `assets/branding/calculeitor.ico` (icono)
 - `assets/templates/memoria_base.docx` (template de memoria)
 - `calculeitor.spec` (ejecutable PyInstaller de un solo archivo)
