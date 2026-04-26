@@ -492,6 +492,74 @@ def _add_row_memory(doc, card: Dict[str, Any], fs_required: float) -> None:
             ]
         )
     _add_kv_table(doc, kv_rows)
+    table_values = dict(card.get("table_values") or {})
+    if table_values:
+        _add_paragraph(doc, "Resultado mostrado en tabla", bold=True, font_size=9.3, color="334155", spacing_after_pt=3)
+        table_summary = (
+            f"FS = {table_values.get('FS') or '-'} | "
+            f"Jx = {table_values.get('Jx_cm4') or '-'} cm^4 | "
+            f"y_bar = {table_values.get('ybar_cm') or '-'} cm | "
+            f"cmax = {table_values.get('cmax_cm') or '-'} cm | "
+            f"Wcrit = {table_values.get('Wcrit_cm3') or '-'} cm^3 | "
+            f"Wreq = {table_values.get('Wreq_cm3') or '-'} cm^3 | "
+            f"sigma_max = {table_values.get('sigma_max_kgcm2') or '-'} kg/cm^2"
+        )
+        _add_paragraph(doc, table_summary, font_size=8.8, color="111827", spacing_after_pt=2)
+        _add_paragraph(
+            doc,
+            "sigma_max corresponde al valor gobernante mostrado en la tabla. El detalle por componente se informa más abajo.",
+            font_size=8.6,
+            color="4B5563",
+            spacing_after_pt=4,
+        )
+    _add_paragraph(doc, "Estado de componentes opcionales", bold=True, font_size=9.3, color="334155", spacing_after_pt=3)
+    optional_status: List[str] = []
+    if not card.get("include_bastidor_lateral"):
+        optional_status.append("Bastidor lateral: no activado.")
+    elif not card.get("bastidor_lateral_structural"):
+        optional_status.append("Bastidor lateral: activado, pero no considerado estructural; no se incluye en la sección resistente.")
+    elif card.get("bastidor_lateral_included"):
+        optional_status.append(
+            f"Bastidor lateral: incluido en la sección resistente. Altura: {_fmt_num(card.get('bastidor_lateral_height_mm'), 2)} mm."
+        )
+    else:
+        optional_status.append("Bastidor lateral: activo, pero no incluido en esta sección.")
+
+    if not card.get("include_piso"):
+        optional_status.append("Piso: no activado.")
+    elif not card.get("piso_structural"):
+        optional_status.append("Piso: activado, pero no considerado estructural; no se incluye en la sección resistente.")
+    elif card.get("piso_included"):
+        optional_status.append(
+            "Piso: incluido en la sección resistente. "
+            f"Material: {str(card.get('material_piso', '-') or '-')}, "
+            f"espesor: {_fmt_num(card.get('espesor_piso'), 4)} mm, "
+            f"ancho: {_fmt_num(card.get('ancho_piso'), 2)} mm."
+        )
+    else:
+        optional_status.append("Piso: activo, pero no incluido en esta sección.")
+
+    if not card.get("include_chapon"):
+        optional_status.append("Chapón: no activado.")
+    elif card.get("chapon_context_error"):
+        optional_status.append("Chapón: activo, pero no verificable por falta de contexto longitudinal.")
+        missing_fields = [str(field) for field in list(card.get("chapon_context_missing_fields") or []) if str(field).strip()]
+        optional_status.append(f"Campos faltantes del chapón: {', '.join(missing_fields) if missing_fields else 'No informado'}.")
+    elif card.get("chapon_included"):
+        optional_status.append(
+            "Chapón: incluido en esta estación. "
+            f"Material: {str(card.get('material_chapon', 'SAE1010') or 'SAE1010')}, "
+            f"espesor: {_fmt_num(card.get('espesor_chapon'), 4)} mm, "
+            f"ancho: {_fmt_num(card.get('ancho_chapon'), 2)} mm, "
+            f"tramo: 0 a {_fmt_num(card.get('chapon_x_end_mm'), 0)} mm."
+        )
+    elif _safe_float(card.get("x_mm")) is None:
+        optional_status.append("Chapón: activo, pero no incluido porque falta la estación x de la fila.")
+    else:
+        optional_status.append("Chapón: activo, pero no incluido porque la estación x está fuera del tramo longitudinal del chapón.")
+    for text in optional_status:
+        _add_paragraph(doc, text, font_size=8.8, color="111827", spacing_after_pt=2)
+
     material_error = bool(card.get("material_error"))
     chapon_context_error = bool(card.get("chapon_context_error"))
     fs_text = str(card.get("fs_text") or "").strip()
