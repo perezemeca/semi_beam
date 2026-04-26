@@ -39,7 +39,7 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name="calculeitor",
+    name="Calculeitor",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

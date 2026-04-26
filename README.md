@@ -1,4 +1,4 @@
-# calculeitor (semi_beam)
+# Calculeitor (semi_beam)
 
 Aplicacion de escritorio para analisis estructural preliminar de vigas isostaticas aplicadas a chasis de semirremolques, acoplados y bitrenes.
 
@@ -164,11 +164,12 @@ El archivo de PyInstaller es:
 calculeitor.spec
 ```
 
-Comando de armado:
+Comando validado de armado:
 
 ```powershell
 python scripts/prepare_release_assets.py
-pyinstaller --clean calculeitor.spec
+Remove-Item -Recurse -Force build, dist -ErrorAction SilentlyContinue
+python -m PyInstaller --clean --noconfirm calculeitor.spec
 ```
 
 Assets incluidos por el `.spec`:
@@ -180,8 +181,17 @@ Assets incluidos por el `.spec`:
 Salida esperada:
 
 ```text
-dist\calculeitor.exe
+dist\Calculeitor.exe
 ```
+
+Smoke check manual del EXE:
+
+- Abrir `dist\Calculeitor.exe`.
+- Verificar que se cargue la base de materiales.
+- Probar el verificador de sección.
+- Exportar gráficos JPG.
+- Exportar memoria de cálculo DOCX.
+- Guardar y cargar un estudio `.sbeam`.
 
 ## Estructura clave
 

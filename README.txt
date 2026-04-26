@@ -1,4 +1,4 @@
-calculeitor (semi_beam) - versión 0.2.0
+Calculeitor (semi_beam)
 
 Aplicación de escritorio para cálculo estructural preliminar de vigas de carrocerías en:
 - Acoplado
@@ -83,14 +83,14 @@ python scripts/prepare_release_assets.py
 pyinstaller --clean calculeitor.spec
 ```
 Salida esperada:
-- `dist\calculeitor.exe`
+- `dist\Calculeitor.exe`
 
 Notas de build
 - El `.spec` empaqueta:
   - `src/semi_beam/data/materials_kgcm2.txt`
   - `assets/templates/memoria_base.docx`
   - `assets/branding/calculeitor.ico`
-- Nombre de producto/EXE: `calculeitor`.
+- Nombre de producto/EXE: `Calculeitor`.
 - Los artefactos generados (`dist/`, `build/`, `.tmp/`, logs, memorias exportadas y estudios `.sbeam`) quedan fuera de Git por `.gitignore`.
 
 Licencia
