@@ -757,6 +757,137 @@ class SectionCheckPanel(QWidget):
             )
         return missing
 
+    def _compute_section_row_result(
+        self,
+        *,
+        hweb: float,
+        tweb_in: float,
+        x_value: Optional[float],
+        m_value: Optional[float],
+        round_up_decimals: int,
+    ) -> dict[str, Any]:
+        sec = self._make_section(hweb, tweb_in, station_mm=x_value)
+        props = sec.props_mm()
+        chapon_context_error = self._chapon_context_missing()
+        chapon_context_missing_fields = self._chapon_context_missing_fields() if chapon_context_error else []
+
+        sigma_base_top_adm = self._mat_sigma(self._current_material_id(self.cmb_mat_top))
+        sigma_base_bot_adm = self._mat_sigma(self._current_material_id(self.cmb_mat_bot))
+        sigma_piso_adm = self._mat_sigma(self._current_material_id(self.cmb_mat_piso))
+        sigma_chapon_adm = self._mat_sigma(CHAPON_MATERIAL_ID)
+        sigma_top_calc_adm = self._top_sigma_for_section(sec, sigma_base_top_adm, sigma_piso_adm)
+        sigma_bot_calc_adm = self._bottom_sigma_for_section(sec, sigma_base_bot_adm, sigma_chapon_adm)
+
+        res = None
+        if m_value is not None and sigma_top_calc_adm is not None and sigma_bot_calc_adm is not None:
+            try:
+                res = compute_flex_row(
+                    section=sec,
+                    M_kgcm=m_value,
+                    sigma_adm_kgcm2=float(min(sigma_top_calc_adm, sigma_bot_calc_adm)),
+                    sigma_adm_top_kgcm2=float(sigma_top_calc_adm),
+                    sigma_adm_bot_kgcm2=float(sigma_bot_calc_adm),
+                    n_beams=self._calculation_n_beams(sec),
+                    round_up_decimals=round_up_decimals,
+                )
+            except Exception:
+                res = None
+
+        calc_n_beams = self._calculation_n_beams(sec)
+        ix_single_cm4 = float(props["Ix_mm4"]) / (10.0 ** 4)
+        ix_total_cm4 = ix_single_cm4 * float(calc_n_beams)
+        h_total_mm = float(props["H_mm"])
+        ybar_cm = float(props["ybar_mm"]) / 10.0
+        c_top_cm = float(props["c_top_mm"]) / 10.0
+        c_bot_cm = float(props["c_bot_mm"]) / 10.0
+        cmax_cm = float(props["c_max_mm"]) / 10.0
+        wcrit_cm3 = ix_total_cm4 / max(cmax_cm, 1e-12)
+        sigma_top = (abs(m_value) * c_top_cm / max(ix_total_cm4, 1e-12)) if m_value is not None else None
+        sigma_bot = (abs(m_value) * c_bot_cm / max(ix_total_cm4, 1e-12)) if m_value is not None else None
+        wreq_top = (abs(m_value) / max(float(sigma_top_calc_adm), 1e-12)) if (m_value is not None and sigma_top_calc_adm is not None) else None
+        wreq_bot = (abs(m_value) / max(float(sigma_bot_calc_adm), 1e-12)) if (m_value is not None and sigma_bot_calc_adm is not None) else None
+        fs_top = (float(sigma_top_calc_adm) / max(sigma_top, 1e-12)) if (sigma_top_calc_adm is not None and sigma_top is not None) else None
+        fs_bot = (float(sigma_bot_calc_adm) / max(sigma_bot, 1e-12)) if (sigma_bot_calc_adm is not None and sigma_bot is not None) else None
+
+        component_checks = self._component_flex_checks(sec, m_value)
+        missing_materials = self._missing_material_components(component_checks)
+        material_error = bool(missing_materials)
+        governing_component = self._governing_component_check(component_checks)
+        fs_final = None
+        sigma_final = None
+        wreq_final = None
+        if chapon_context_error:
+            res = None
+            wreq_top = None
+            wreq_bot = None
+            fs_top = None
+            fs_bot = None
+            governing_component = None
+        elif material_error:
+            res = None
+            wreq_top = None
+            wreq_bot = None
+            fs_top = None
+            fs_bot = None
+            governing_component = None
+        elif governing_component is not None:
+            fs_final = float(governing_component["fs"])
+            sigma_final = float(governing_component["sigma_calc_kgcm2"])
+            wreq_values = [
+                float(row["wreq_cm3"])
+                for row in component_checks
+                if row.get("wreq_cm3") is not None
+            ]
+            if wreq_values:
+                wreq_final = max(wreq_values)
+                wreq_top = wreq_final
+                wreq_bot = wreq_final
+        elif res is not None:
+            fs_final = float(res.FS)
+            sigma_final = float(res.sigma_max_kgcm2)
+            wreq_final = float(res.Wreq_cm3)
+
+        if wreq_final is None and res is not None:
+            wreq_final = float(res.Wreq_cm3)
+        if sigma_final is None and res is not None:
+            sigma_final = float(res.sigma_max_kgcm2)
+        if fs_final is None and res is not None:
+            fs_final = float(res.FS)
+
+        return {
+            "sec": sec,
+            "res": res,
+            "chapon_context_error": chapon_context_error,
+            "chapon_context_missing_fields": chapon_context_missing_fields,
+            "sigma_top_calc_adm": sigma_top_calc_adm,
+            "sigma_bot_calc_adm": sigma_bot_calc_adm,
+            "sigma_base_top_adm": sigma_base_top_adm,
+            "sigma_base_bot_adm": sigma_base_bot_adm,
+            "sigma_piso_adm": sigma_piso_adm,
+            "sigma_chapon_adm": sigma_chapon_adm,
+            "component_checks": component_checks,
+            "missing_materials": missing_materials,
+            "material_error": material_error,
+            "governing_component": governing_component,
+            "fs_final": fs_final,
+            "sigma_final": sigma_final,
+            "wreq_final": wreq_final,
+            "fs_top": fs_top,
+            "fs_bot": fs_bot,
+            "sigma_top": sigma_top,
+            "sigma_bot": sigma_bot,
+            "ix_single_cm4": ix_single_cm4,
+            "ix_total_cm4": ix_total_cm4,
+            "h_total_mm": h_total_mm,
+            "ybar_cm": ybar_cm,
+            "c_top_cm": c_top_cm,
+            "c_bot_cm": c_bot_cm,
+            "cmax_cm": cmax_cm,
+            "wcrit_cm3": wcrit_cm3,
+            "wreq_top": wreq_top,
+            "wreq_bot": wreq_bot,
+        }
+
     # -------- Preview ----------
     def _draw_dim_v_on(self, ax, y1: float, y2: float, x_dim: float, x_obj: float, text: str, *, color="blue"):
         ax.plot([x_obj, x_dim], [y1, y1], color=color, linewidth=1.0)
@@ -1178,10 +1309,6 @@ class SectionCheckPanel(QWidget):
 
     def _recompute_all(self):
         nmin = float(self.n_min.value())
-        s_top = self._mat_sigma(self._current_material_id(self.cmb_mat_top))
-        s_bot = self._mat_sigma(self._current_material_id(self.cmb_mat_bot))
-        s_piso = self._mat_sigma(self._current_material_id(self.cmb_mat_piso))
-        s_chapon = self._mat_sigma(CHAPON_MATERIAL_ID)
 
         for r in range(self.tbl.rowCount()):
             try:
@@ -1195,50 +1322,37 @@ class SectionCheckPanel(QWidget):
                     self._set_row_color(r, ok=None)
                     continue
 
-                if self._chapon_context_missing():
+                row_result = self._compute_section_row_result(
+                    hweb=float(hweb),
+                    tweb_in=tweb_in,
+                    x_value=x_value,
+                    m_value=M,
+                    round_up_decimals=2,
+                )
+
+                if row_result["chapon_context_error"]:
                     self._clear_out_cells(r)
                     self._set_out_cell(r, self.COL_FS, "ERR CHAPÓN")
                     self._set_row_color(r, ok=False)
                     continue
 
-                sec = self._make_section(hweb, tweb_in, station_mm=x_value)
-                s_top_calc = self._top_sigma_for_section(sec, s_top, s_piso)
-                s_bot_calc = self._bottom_sigma_for_section(sec, s_bot, s_chapon)
-                component_checks = self._component_flex_checks(sec, M)
-                missing_materials = self._missing_material_components(component_checks)
-                if missing_materials:
+                if row_result["missing_materials"]:
                     self._clear_out_cells(r)
                     self._set_out_cell(r, self.COL_FS, "ERR MAT")
                     self._set_row_color(r, ok=False)
                     continue
-                if s_top_calc is None or s_bot_calc is None:
+                if row_result["sigma_top_calc_adm"] is None or row_result["sigma_bot_calc_adm"] is None:
                     self._clear_out_cells(r)
                     self._set_out_cell(r, self.COL_FS, "ERR MAT")
                     self._set_row_color(r, ok=False)
                     continue
 
-                res = compute_flex_row(
-                    section=sec,
-                    M_kgcm=M,
-                    sigma_adm_kgcm2=float(min(s_top_calc, s_bot_calc)),
-                    sigma_adm_top_kgcm2=float(s_top_calc),
-                    sigma_adm_bot_kgcm2=float(s_bot_calc),
-                    n_beams=self._calculation_n_beams(sec),
-                    round_up_decimals=2,
-                )
-                governing_component = self._governing_component_check(component_checks)
-                fs_final = float(governing_component["fs"]) if governing_component is not None else float(res.FS)
-                sigma_final = (
-                    float(governing_component["sigma_calc_kgcm2"])
-                    if governing_component is not None
-                    else float(res.sigma_max_kgcm2)
-                )
-                wreq_values = [
-                    float(row["wreq_cm3"])
-                    for row in component_checks
-                    if row.get("wreq_cm3") is not None
-                ]
-                wreq_final = max(wreq_values) if wreq_values else float(res.Wreq_cm3)
+                res = row_result["res"]
+                fs_final = row_result["fs_final"]
+                sigma_final = row_result["sigma_final"]
+                wreq_final = row_result["wreq_final"]
+                if res is None or fs_final is None or sigma_final is None or wreq_final is None:
+                    raise RuntimeError("No se pudo calcular la verificación de flexión.")
 
                 self._set_out_cell(r, self.COL_JX, _fmt2(res.Jx_cm4))
                 self._set_out_cell(r, self.COL_YBAR, _fmt2(res.ybar_cm))
@@ -1366,11 +1480,7 @@ class SectionCheckPanel(QWidget):
     def _collect_section_export_cards(self) -> list[dict[str, Any]]:
         cards: list[dict[str, Any]] = []
         nmin = float(self.n_min.value())
-        sigma_top_adm = self._mat_sigma(self._current_material_id(self.cmb_mat_top))
-        sigma_bot_adm = self._mat_sigma(self._current_material_id(self.cmb_mat_bot))
         sigma_web_adm = self._mat_sigma(self._current_material_id(self.cmb_mat_web))
-        sigma_piso_adm = self._mat_sigma(self._current_material_id(self.cmb_mat_piso))
-        sigma_chapon_adm = self._mat_sigma(CHAPON_MATERIAL_ID)
         t_top_in = _parse_frac_in(self._current_thickness_in(self.cmb_t_top))
         t_bot_in = _parse_frac_in(self._current_thickness_in(self.cmb_t_bot))
         for r in range(self.tbl.rowCount()):
@@ -1378,18 +1488,24 @@ class SectionCheckPanel(QWidget):
             x_value = _try_float(_get_text(self.tbl, r, self.COL_X))
             if hweb is None or hweb <= 0.0:
                 continue
+            M_value = _try_float(_get_text(self.tbl, r, self.COL_M))
             try:
                 tweb_in = _parse_frac_in(self._current_tweb_in(r))
-                sec = self._make_section(hweb, tweb_in, station_mm=x_value)
-                props = sec.props_mm()
+                row_result = self._compute_section_row_result(
+                    hweb=float(hweb),
+                    tweb_in=tweb_in,
+                    x_value=x_value,
+                    m_value=M_value,
+                    round_up_decimals=4,
+                )
             except Exception:
                 continue
 
             fs_text = _get_text(self.tbl, r, self.COL_FS)
             fs_value = _try_float(fs_text)
-            M_value = _try_float(_get_text(self.tbl, r, self.COL_M))
-            chapon_context_error = self._chapon_context_missing()
-            chapon_context_missing_fields = self._chapon_context_missing_fields() if chapon_context_error else []
+            sec = row_result["sec"]
+            chapon_context_error = row_result["chapon_context_error"]
+            chapon_context_missing_fields = row_result["chapon_context_missing_fields"]
             V_value = None
             if self._shear_provider is not None and x_value is not None:
                 try:
@@ -1397,70 +1513,25 @@ class SectionCheckPanel(QWidget):
                 except Exception:
                     V_value = None
 
-            res = None
-            sigma_top_calc_adm = self._top_sigma_for_section(sec, sigma_top_adm, sigma_piso_adm)
-            sigma_bot_calc_adm = self._bottom_sigma_for_section(sec, sigma_bot_adm, sigma_chapon_adm)
-            if M_value is not None and sigma_top_calc_adm is not None and sigma_bot_calc_adm is not None:
-                try:
-                    res = compute_flex_row(
-                        section=sec,
-                        M_kgcm=M_value,
-                        sigma_adm_kgcm2=float(min(sigma_top_calc_adm, sigma_bot_calc_adm)),
-                        sigma_adm_top_kgcm2=float(sigma_top_calc_adm),
-                        sigma_adm_bot_kgcm2=float(sigma_bot_calc_adm),
-                        n_beams=self._calculation_n_beams(sec),
-                        round_up_decimals=4,
-                    )
-                except Exception:
-                    res = None
-
-            calc_n_beams = self._calculation_n_beams(sec)
-            ix_single_cm4 = float(props["Ix_mm4"]) / (10.0 ** 4)
-            ix_total_cm4 = ix_single_cm4 * float(calc_n_beams)
-            h_total_mm = float(props["H_mm"])
-            ybar_cm = float(props["ybar_mm"]) / 10.0
-            c_top_cm = float(props["c_top_mm"]) / 10.0
-            c_bot_cm = float(props["c_bot_mm"]) / 10.0
-            cmax_cm = float(props["c_max_mm"]) / 10.0
-            wcrit_cm3 = ix_total_cm4 / max(cmax_cm, 1e-12)
-            sigma_top = (abs(M_value) * c_top_cm / max(ix_total_cm4, 1e-12)) if M_value is not None else None
-            sigma_bot = (abs(M_value) * c_bot_cm / max(ix_total_cm4, 1e-12)) if M_value is not None else None
-            wreq_top = (abs(M_value) / max(float(sigma_top_calc_adm), 1e-12)) if (M_value is not None and sigma_top_calc_adm is not None) else None
-            wreq_bot = (abs(M_value) / max(float(sigma_bot_calc_adm), 1e-12)) if (M_value is not None and sigma_bot_calc_adm is not None) else None
-            fs_top = (float(sigma_top_calc_adm) / max(sigma_top, 1e-12)) if (sigma_top_calc_adm is not None and sigma_top is not None) else None
-            fs_bot = (float(sigma_bot_calc_adm) / max(sigma_bot, 1e-12)) if (sigma_bot_calc_adm is not None and sigma_bot is not None) else None
-            component_checks = self._component_flex_checks(sec, M_value)
-            missing_materials = self._missing_material_components(component_checks)
-            governing_component = self._governing_component_check(component_checks)
+            res = row_result["res"]
+            sigma_top_calc_adm = row_result["sigma_top_calc_adm"]
+            sigma_bot_calc_adm = row_result["sigma_bot_calc_adm"]
+            component_checks = row_result["component_checks"]
+            missing_materials = row_result["missing_materials"]
+            governing_component = row_result["governing_component"]
+            wreq_top = row_result["wreq_top"]
+            wreq_bot = row_result["wreq_bot"]
+            fs_top = row_result["fs_top"]
+            fs_bot = row_result["fs_bot"]
             if chapon_context_error:
                 fs_value = None
                 fs_text = "ERR CHAPÓN"
-                res = None
-                wreq_top = None
-                wreq_bot = None
-                fs_top = None
-                fs_bot = None
-                governing_component = None
             elif missing_materials:
                 fs_value = None
                 fs_text = "ERR MAT"
-                res = None
-                wreq_top = None
-                wreq_bot = None
-                fs_top = None
-                fs_bot = None
-                governing_component = None
             elif governing_component is not None:
-                fs_value = float(governing_component["fs"])
+                fs_value = row_result["fs_final"]
                 fs_text = _fmt2(fs_value)
-                wreq_values = [
-                    float(row["wreq_cm3"])
-                    for row in component_checks
-                    if row.get("wreq_cm3") is not None
-                ]
-                if wreq_values:
-                    wreq_top = max(wreq_values)
-                    wreq_bot = max(wreq_values)
             shear = self._compute_shear_check_data(sec, V_value, sigma_web_adm)
             cards.append(
                 {
@@ -1479,7 +1550,7 @@ class SectionCheckPanel(QWidget):
                     },
                     "fs_text": fs_text or "-",
                     "ok": fs_value is not None and fs_value >= nmin,
-                    "material_error": bool(missing_materials),
+                    "material_error": row_result["material_error"],
                     "missing_material_components": missing_materials,
                     "section": sec,
                     "include_bastidor_lateral": bool(self.chk_bastidor_lateral.isChecked()),
@@ -1503,11 +1574,11 @@ class SectionCheckPanel(QWidget):
                     "chapon_x_end_mm": self._chapon_end_mm(),
                     "moment_kgcm": M_value,
                     "sigma_top_adm_kgcm2": sigma_top_calc_adm,
-                    "sigma_base_top_adm_kgcm2": sigma_top_adm,
-                    "sigma_piso_adm_kgcm2": sigma_piso_adm,
+                    "sigma_base_top_adm_kgcm2": row_result["sigma_base_top_adm"],
+                    "sigma_piso_adm_kgcm2": row_result["sigma_piso_adm"],
                     "sigma_bot_adm_kgcm2": sigma_bot_calc_adm,
-                    "sigma_base_bot_adm_kgcm2": sigma_bot_adm,
-                    "sigma_chapon_adm_kgcm2": sigma_chapon_adm,
+                    "sigma_base_bot_adm_kgcm2": row_result["sigma_base_bot_adm"],
+                    "sigma_chapon_adm_kgcm2": row_result["sigma_chapon_adm"],
                     "sigma_web_adm_kgcm2": sigma_web_adm,
                     "t_top_in": t_top_in,
                     "t_bot_in": t_bot_in,
@@ -1515,18 +1586,18 @@ class SectionCheckPanel(QWidget):
                     "t_bot_mm": float(sec.t_bot_mm),
                     "t_web_mm": float(sec.t_web_mm),
                     "b_f_mm": float(sec.b_f_mm),
-                    "h_total_mm": h_total_mm,
-                    "ix_single_cm4": ix_single_cm4,
-                    "ix_total_cm4": ix_total_cm4,
-                    "ybar_cm": ybar_cm,
-                    "c_top_cm": c_top_cm,
-                    "c_bot_cm": c_bot_cm,
-                    "cmax_cm": cmax_cm,
-                    "wcrit_cm3": wcrit_cm3,
+                    "h_total_mm": row_result["h_total_mm"],
+                    "ix_single_cm4": row_result["ix_single_cm4"],
+                    "ix_total_cm4": row_result["ix_total_cm4"],
+                    "ybar_cm": row_result["ybar_cm"],
+                    "c_top_cm": row_result["c_top_cm"],
+                    "c_bot_cm": row_result["c_bot_cm"],
+                    "cmax_cm": row_result["cmax_cm"],
+                    "wcrit_cm3": row_result["wcrit_cm3"],
                     "wreq_top_cm3": wreq_top,
                     "wreq_bot_cm3": wreq_bot,
-                    "sigma_top_kgcm2": sigma_top,
-                    "sigma_bot_kgcm2": sigma_bot,
+                    "sigma_top_kgcm2": row_result["sigma_top"],
+                    "sigma_bot_kgcm2": row_result["sigma_bot"],
                     "fs_top": fs_top,
                     "fs_bot": fs_bot,
                     "component_checks": component_checks,
