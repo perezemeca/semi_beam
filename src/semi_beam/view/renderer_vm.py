@@ -196,6 +196,7 @@ def render_shear(ax, diag, y_zoom: float = 1.0, xlim: Optional[Tuple[float, floa
     ax.set_ylabel("V [kg]")
     ax.set_title("Diagrama de Corte V(x)")
     ax.grid(True, alpha=0.25)
+    return line
 
 
 def render_moment(ax, diag, y_zoom: float = 1.0, xlim: Optional[Tuple[float, float]] = None):
@@ -232,6 +233,7 @@ def render_moment(ax, diag, y_zoom: float = 1.0, xlim: Optional[Tuple[float, flo
     ax.set_xlabel("x [mm]")
     ax.set_title("Diagrama de Momento Flector M(x)")
     ax.grid(True, alpha=0.25)
+    return line
 
 
 def render_deflection(ax, result, y_zoom: float = 1.0, xlim: Optional[Tuple[float, float]] = None):
@@ -272,3 +274,4 @@ def render_deflection(ax, result, y_zoom: float = 1.0, xlim: Optional[Tuple[floa
     ax.set_title("Deformada Total v(x)")
     ax.grid(True, alpha=0.25)
     ax.legend(loc="best", fontsize=8, framealpha=0.9)
+    return line

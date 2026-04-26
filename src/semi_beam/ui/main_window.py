@@ -48,6 +48,7 @@ from semi_beam.domain.cases import BeamCase
 from semi_beam.engine.equilibrium import solve_equilibrium
 from semi_beam.engine.deflection import compute_total_deflection
 from semi_beam.engine.diagrams import build_V_M
+from semi_beam.view.diagram_hover import DiagramHoverInspector, HoverCurve
 from semi_beam.view.renderer_vm import render_shear, render_moment, render_deflection
 from semi_beam.services.memoria_calculo_docx import (
     export_memoria_docx,
@@ -1038,6 +1039,7 @@ class FBDApp(QMainWindow):
     def __init__(self):
         super().__init__()
         self._current_study_path: Optional[str] = None
+        self._diagram_hover: Optional[DiagramHoverInspector] = None
         self._update_window_title()
         self.resize(1500, 850)
         try:
@@ -1200,6 +1202,60 @@ class FBDApp(QMainWindow):
         else:
             self.setWindowTitle(APP_TITLE_BASE)
 
+    def _disconnect_diagram_hover(self) -> None:
+        if self._diagram_hover is not None:
+            self._diagram_hover.disconnect()
+        self._diagram_hover = None
+
+    def _hide_diagram_hover(self) -> None:
+        if self._diagram_hover is not None:
+            self._diagram_hover.hide()
+
+    def _setup_diagram_hover(self, line_v=None, line_m=None, line_def=None) -> None:
+        self._disconnect_diagram_hover()
+        curves = []
+        if line_v is not None:
+            curves.append(
+                HoverCurve(
+                    ax=self.ax_V,
+                    line=line_v,
+                    label="V",
+                    x_unit="mm",
+                    y_unit="kg",
+                    y_display_scale=1.0,
+                    x_decimals=0,
+                    y_decimals=0,
+                )
+            )
+        if line_m is not None:
+            curves.append(
+                HoverCurve(
+                    ax=self.ax_M,
+                    line=line_m,
+                    label="M",
+                    x_unit="mm",
+                    y_unit="kg·cm",
+                    y_display_scale=0.1,
+                    x_decimals=0,
+                    y_decimals=0,
+                )
+            )
+        if line_def is not None:
+            curves.append(
+                HoverCurve(
+                    ax=self.ax_defl,
+                    line=line_def,
+                    label="δ",
+                    x_unit="mm",
+                    y_unit="mm",
+                    y_display_scale=1.0,
+                    x_decimals=0,
+                    y_decimals=1,
+                )
+            )
+        if curves:
+            self._diagram_hover = DiagramHoverInspector(self.canvas, curves)
+
     def active_tab(self):
         return self.tabs.currentWidget()
 
@@ -1281,6 +1337,7 @@ class FBDApp(QMainWindow):
         return super().eventFilter(obj, event)
 
     def _clear_plot_canvas(self, subtitle: str = ""):
+        self._disconnect_diagram_hover()
         for ax in (self.ax_fbd, self.ax_V, self.ax_M, self.ax_defl):
             ax.clear()
             ax.set_axis_off()
@@ -1452,7 +1509,7 @@ class FBDApp(QMainWindow):
                 summary_target.clear_deflection_summary("Convexidad L/2: +30 mm\nvmin total: -\nUtilizado: - / 60 mm\nEstado: desactivada")
                 if hasattr(summary_target, "section_panel"):
                     summary_target.section_panel.set_deflection_context(None)
-            return
+            return None
 
         if payload is None:
             self.ax_defl.clear()
@@ -1462,17 +1519,19 @@ class FBDApp(QMainWindow):
                 summary_target.clear_deflection_summary("Convexidad L/2: +30 mm\nvmin total: -\nUtilizado: - / 60 mm\nEstado: complete la tabla de secciones")
                 if hasattr(summary_target, "section_panel"):
                     summary_target.section_panel.set_deflection_context(None)
-            return
+            return None
 
         result, i_source = payload
-        render_deflection(self.ax_defl, result, y_zoom=1.0, xlim=xlim)
+        line_def = render_deflection(self.ax_defl, result, y_zoom=1.0, xlim=xlim)
         if summary_target is not None:
             summary_target.set_deflection_summary(self._deflection_summary_text(result, i_source), ok=bool(result.ok))
             if hasattr(summary_target, "section_panel"):
                 summary_target.section_panel.set_deflection_context(result, i_source=i_source)
+        return line_def
 
     def _save_axis_snapshot(self, ax, out_path: str, *, dpi: int = MEMORIA_EXPORT_IMAGE_DPI):
         fig = self.fig
+        self._hide_diagram_hover()
         self.canvas.draw()
         renderer = fig.canvas.get_renderer()
         bbox = ax.get_tightbbox(renderer).transformed(fig.dpi_scale_trans.inverted())
@@ -1496,15 +1555,16 @@ class FBDApp(QMainWindow):
             x_start=xlim[0],
             x_end=xlim[1],
         )
-        render_shear(self.ax_V, diag, y_zoom=1.0, xlim=xlim)
+        line_v = render_shear(self.ax_V, diag, y_zoom=1.0, xlim=xlim)
         self.ax_V.set_xlabel("x [mm]")
         self.ax_V.tick_params(labelbottom=True)
 
-        render_moment(self.ax_M, diag, y_zoom=1.0, xlim=xlim)
+        line_m = render_moment(self.ax_M, diag, y_zoom=1.0, xlim=xlim)
         self.ax_M.set_xlabel("x [mm]")
         self.ax_M.tick_params(labelbottom=True)
 
         defl_payload = None
+        line_def = None
         if set_diag_on_tab is not None and set_diag_on_tab.deflection_enabled():
             defl_payload = self._compute_deflection_result(
                 diag=diag,
@@ -1513,7 +1573,7 @@ class FBDApp(QMainWindow):
                 params=set_diag_on_tab.deflection_params(),
                 section_panel=set_diag_on_tab.section_panel,
             )
-            self._render_deflection_axis(
+            line_def = self._render_deflection_axis(
                 payload=defl_payload,
                 xlim=xlim,
                 enabled=set_diag_on_tab.deflection_enabled(),
@@ -1521,13 +1581,14 @@ class FBDApp(QMainWindow):
                 unavailable_text="Deformada desactivada.",
             )
         else:
-            self._render_deflection_axis(
+            line_def = self._render_deflection_axis(
                 payload=None,
                 xlim=xlim,
                 enabled=False,
                 summary_target=None,
             )
 
+        self._setup_diagram_hover(line_v=line_v, line_m=line_m, line_def=line_def)
         self.fig.subplots_adjust(left=0.07, right=0.985, top=0.96, bottom=0.06, hspace=0.65)
         self.canvas.draw_idle()
 
@@ -1557,11 +1618,13 @@ class FBDApp(QMainWindow):
         )
         tab.set_diag(diag)
 
+        line_v = None
+        line_m = None
         if state.show_vm:
-            render_shear(self.ax_V, diag, y_zoom=1.0, xlim=xlim)
+            line_v = render_shear(self.ax_V, diag, y_zoom=1.0, xlim=xlim)
             self.ax_V.set_xlabel("x [mm]")
             self.ax_V.tick_params(labelbottom=True)
-            render_moment(self.ax_M, diag, y_zoom=1.0, xlim=xlim)
+            line_m = render_moment(self.ax_M, diag, y_zoom=1.0, xlim=xlim)
             self.ax_M.set_xlabel("x [mm]")
             self.ax_M.tick_params(labelbottom=True)
         else:
@@ -1579,7 +1642,7 @@ class FBDApp(QMainWindow):
                 params=tab.deflection_params(),
                 section_panel=tab.section_panel,
             )
-        self._render_deflection_axis(
+        line_def = self._render_deflection_axis(
             payload=defl_payload,
             xlim=xlim,
             enabled=tab.deflection_enabled(),
@@ -1587,6 +1650,7 @@ class FBDApp(QMainWindow):
             unavailable_text="Deformada desactivada.",
         )
 
+        self._setup_diagram_hover(line_v=line_v, line_m=line_m, line_def=line_def)
         self.fig.subplots_adjust(left=0.07, right=0.985, top=0.96, bottom=0.06, hspace=0.65)
         self.canvas.draw_idle()
 
@@ -1789,6 +1853,7 @@ class FBDApp(QMainWindow):
         if not folder:
             return
         try:
+            self._hide_diagram_hover()
             self.canvas.draw()
             fig = self.fig
             renderer = fig.canvas.get_renderer()
