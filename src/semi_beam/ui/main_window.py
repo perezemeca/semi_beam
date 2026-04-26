@@ -879,6 +879,10 @@ class UnitTab(QWidget):
 
     def set_diag(self, diag):
         self._last_diag = diag
+        self.section_panel.set_beam_context(
+            largo_viga_mm=_spin_value_or_none(self.Lc),
+            posicion_perno_mm=_spin_value_or_none(self.x_front_or_kp),
+        )
         if diag is None:
             self.section_panel.set_moment_provider(None)
             self.section_panel.set_shear_provider(None)
@@ -1085,7 +1089,6 @@ class FBDApp(QMainWindow):
         self.ax_V = self.fig.add_subplot(gs[1, 0], sharex=self.ax_fbd)
         self.ax_M = self.fig.add_subplot(gs[2, 0], sharex=self.ax_fbd)
         self.ax_defl = self.fig.add_subplot(gs[3, 0], sharex=self.ax_fbd)
-
         self.canvas = FigureCanvas(self.fig)
         self.canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.canvas.setMinimumHeight(980)

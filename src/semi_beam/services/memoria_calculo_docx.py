@@ -358,8 +358,12 @@ def _add_theory_section(doc) -> None:
     _add_paragraph(
         doc,
         "La verificación se desarrolla para una sección doble T idealizada como tres rectángulos: "
-        "planchuela inferior, alma y planchuela superior. El análisis es elástico lineal y considera "
-        "flexión simple en el eje fuerte de la sección.",
+        "planchuela inferior, alma y planchuela superior. Si se activan componentes estructurales "
+        "adicionales, la sección se evalúa como una geometría compuesta con dos perfiles C laterales "
+        "y/o una placa de piso centrada sobre la cara superior. Si se activa el chapón inferior, "
+        "se suma como placa de refuerzo SAE 1010 solo en las estaciones ubicadas entre el inicio de "
+        "la viga y 1000 mm después del perno rey. El análisis es elástico lineal y considera flexión "
+        "simple en el eje fuerte de la sección.",
         font_size=9,
         color="111827",
         spacing_after_pt=4,
@@ -384,62 +388,286 @@ def _add_theory_section(doc) -> None:
         "W_crit = I_x / c_max",
         "sigma = M * c / I_x",
         "tau = V * Q / (I_x * t)",
-        "W_req = max(M / sigma_adm,sup ; M / sigma_adm,inf)",
-        "FS = min(sigma_adm,sup / sigma_sup ; sigma_adm,inf / sigma_inf)",
+        "sigma_i = M * c_i / I_x,total para cada componente activo",
+        "FS_i = sigma_adm,i / sigma_i ; FS = min(FS_i)",
         "v_utilizada = convexidad - v_min ; v_utilizada <= v_adm",
     ]:
         _add_equation_paragraph(doc, eq)
     doc.add_paragraph("")
 
 
+def _add_component_check_table(doc, checks: Sequence[Dict[str, Any]], fs_required: float) -> None:
+    if not checks:
+        return
+    _add_paragraph(
+        doc,
+        "Verificación por componente",
+        bold=True,
+        font_size=9.3,
+        color="334155",
+        spacing_after_pt=3,
+    )
+    headers = ["Componente", "Material", "y inf [cm]", "y sup [cm]", "c máx [cm]", "σ calc", "σ adm", "FS", "Estado"]
+    widths = [33.0, 22.0, 15.0, 15.0, 17.0, 18.0, 18.0, 14.0, 18.0]
+    table = doc.add_table(rows=1 + len(checks), cols=len(headers))
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    table.autofit = False
+    table.style = "Table Grid"
+    for idx, header in enumerate(headers):
+        cell = table.rows[0].cells[idx]
+        cell.width = Mm(widths[idx])
+        cell.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+        _set_cell_shading(cell, "1F3A5F")
+        _set_cell_text(cell, header, bold=True, font_size=7.2, align=WD_ALIGN_PARAGRAPH.CENTER, color="FFFFFF")
+
+    for row_idx, check in enumerate(checks, start=1):
+        fs = _safe_float(check.get("fs"))
+        ok = fs is not None and fs >= float(fs_required)
+        material_missing = check.get("sigma_adm_kgcm2") is None
+        row_values = [
+            str(check.get("component", "-") or "-"),
+            str(check.get("material", "-") or "-"),
+            _fmt_num(check.get("y_inf_cm"), 3),
+            _fmt_num(check.get("y_sup_cm"), 3),
+            _fmt_num(check.get("cmax_cm"), 3),
+            _fmt_num(check.get("sigma_calc_kgcm2"), 2),
+            "-" if check.get("sigma_adm_kgcm2") is None else _fmt_num(check.get("sigma_adm_kgcm2"), 2),
+            "-" if fs is None else _fmt_num(fs, 3),
+            "MATERIAL FALTANTE" if material_missing else ("CUMPLE" if ok else "NO CUMPLE"),
+        ]
+        for col_idx, value in enumerate(row_values):
+            cell = table.rows[row_idx].cells[col_idx]
+            cell.width = Mm(widths[col_idx])
+            cell.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+            _set_cell_shading(cell, "E7F7EC" if ok else "FDECEC")
+            _set_cell_text(cell, value, font_size=7.0, align=WD_ALIGN_PARAGRAPH.CENTER, color="111827")
+    doc.add_paragraph("")
+
+
 def _add_row_memory(doc, card: Dict[str, Any], fs_required: float) -> None:
     sec = str(card.get("sec", "-"))
     _add_paragraph(doc, f"2.{sec} Sección {sec}", bold=True, font_size=10.5, color="334155", spacing_after_pt=4)
-    _add_kv_table(
-        doc,
-        [
-            ("Posición x", f"{card.get('x_mm') or '-'} mm"),
-            ("Momento actuante M", f"{_fmt_num(card.get('moment_kgcm'), 2)} kg·cm" if card.get("moment_kgcm") is not None else "-"),
-            ("Corte actuante V", f"{_fmt_num((card.get('shear') or {}).get('V_kg'), 2)} kg" if (card.get("shear") or {}).get("V_kg") is not None else "-"),
-            ("Base ala", f"{_fmt_num(card.get('b_f_mm'), 2)} mm"),
-            ("Espesor ala superior", f"{_fmt_num(card.get('t_top_mm'), 2)} mm ({_fmt_num(card.get('t_top_in'), 4)} in)"),
-            ("Espesor ala inferior", f"{_fmt_num(card.get('t_bot_mm'), 2)} mm ({_fmt_num(card.get('t_bot_in'), 4)} in)"),
-            ("Espesor de alma", f"{_fmt_num(card.get('t_web_mm'), 2)} mm ({card.get('t_web_in', '-')})"),
-            ("Altura libre del alma", f"{_fmt_num(card.get('h_web_mm'), 2)} mm"),
-            ("σ admisible superior", f"{_fmt_num(card.get('sigma_top_adm_kgcm2'), 2)} kg/cm²" if card.get("sigma_top_adm_kgcm2") is not None else "-"),
-            ("σ admisible inferior", f"{_fmt_num(card.get('sigma_bot_adm_kgcm2'), 2)} kg/cm²" if card.get("sigma_bot_adm_kgcm2") is not None else "-"),
-        ],
-    )
+    kv_rows = [
+        ("Posición x", f"{card.get('x_mm') or '-'} mm"),
+        ("Momento actuante M", f"{_fmt_num(card.get('moment_kgcm'), 2)} kg·cm" if card.get("moment_kgcm") is not None else "-"),
+        ("Corte actuante V", f"{_fmt_num((card.get('shear') or {}).get('V_kg'), 2)} kg" if (card.get("shear") or {}).get("V_kg") is not None else "-"),
+        ("Base ala", f"{_fmt_num(card.get('b_f_mm'), 2)} mm"),
+        ("Espesor ala superior", f"{_fmt_num(card.get('t_top_mm'), 2)} mm ({_fmt_num(card.get('t_top_in'), 4)} in)"),
+        ("Espesor ala inferior", f"{_fmt_num(card.get('t_bot_mm'), 2)} mm ({_fmt_num(card.get('t_bot_in'), 4)} in)"),
+        ("Espesor de alma", f"{_fmt_num(card.get('t_web_mm'), 2)} mm ({card.get('t_web_in', '-')})"),
+        ("Altura libre del alma", f"{_fmt_num(card.get('h_web_mm'), 2)} mm"),
+        ("σ admisible superior", f"{_fmt_num(card.get('sigma_top_adm_kgcm2'), 2)} kg/cm²" if card.get("sigma_top_adm_kgcm2") is not None else "-"),
+        ("σ admisible inferior", f"{_fmt_num(card.get('sigma_bot_adm_kgcm2'), 2)} kg/cm²" if card.get("sigma_bot_adm_kgcm2") is not None else "-"),
+    ]
+    if card.get("bastidor_lateral_included"):
+        kv_rows.extend(
+            [
+                ("Bastidor lateral colaborante", "Sí, dos perfiles C simétricos"),
+                ("Altura bastidor lateral", f"{_fmt_num(card.get('bastidor_lateral_height_mm'), 2)} mm"),
+                ("Ubicación bastidores", "x = ±1250 mm; apertura hacia el centro"),
+            ]
+        )
+    if card.get("piso_included"):
+        kv_rows.extend(
+            [
+                ("Piso colaborante", "Sí, placa rectangular centrada en X = 0"),
+                ("Material piso", str(card.get("material_piso", "-") or "-")),
+                ("Espesor piso", f"{_fmt_num(card.get('espesor_piso'), 4)} mm"),
+                ("Ancho piso", f"{_fmt_num(card.get('ancho_piso'), 2)} mm"),
+                ("Ubicación piso", "x = -1215 a +1215 mm; y inferior = Y_top"),
+            ]
+        )
+    if card.get("chapon_included"):
+        kv_rows.extend(
+            [
+                ("Chapón inferior", "Sí, placa rectangular centrada en X = 0"),
+                ("Material chapón", str(card.get("material_chapon", "SAE1010") or "SAE1010")),
+                ("Espesor chapón", f"{_fmt_num(card.get('espesor_chapon'), 4)} mm"),
+                ("Ancho chapón", f"{_fmt_num(card.get('ancho_chapon'), 2)} mm"),
+                ("Ubicación transversal chapón", "x = -525 a +525 mm; cara superior contra la planchuela inferior"),
+                (
+                    "Tramo longitudinal chapón",
+                    f"x = {_fmt_num(card.get('chapon_x_start_mm'), 0)} a {_fmt_num(card.get('chapon_x_end_mm'), 0)} mm",
+                ),
+            ]
+        )
+    _add_kv_table(doc, kv_rows)
+    table_values = dict(card.get("table_values") or {})
+    if table_values:
+        _add_paragraph(doc, "Resultado mostrado en tabla", bold=True, font_size=9.3, color="334155", spacing_after_pt=3)
+        table_summary = (
+            f"FS = {table_values.get('FS') or '-'} | "
+            f"Jx = {table_values.get('Jx_cm4') or '-'} cm^4 | "
+            f"y_bar = {table_values.get('ybar_cm') or '-'} cm | "
+            f"cmax = {table_values.get('cmax_cm') or '-'} cm | "
+            f"Wcrit = {table_values.get('Wcrit_cm3') or '-'} cm^3 | "
+            f"Wreq = {table_values.get('Wreq_cm3') or '-'} cm^3 | "
+            f"sigma_max = {table_values.get('sigma_max_kgcm2') or '-'} kg/cm^2"
+        )
+        _add_paragraph(doc, table_summary, font_size=8.8, color="111827", spacing_after_pt=2)
+        _add_paragraph(
+            doc,
+            "sigma_max corresponde al valor gobernante mostrado en la tabla. El detalle por componente se informa más abajo.",
+            font_size=8.6,
+            color="4B5563",
+            spacing_after_pt=4,
+        )
+    _add_paragraph(doc, "Estado de componentes opcionales", bold=True, font_size=9.3, color="334155", spacing_after_pt=3)
+    optional_status: List[str] = []
+    if not card.get("include_bastidor_lateral"):
+        optional_status.append("Bastidor lateral: no activado.")
+    elif not card.get("bastidor_lateral_structural"):
+        optional_status.append("Bastidor lateral: activado, pero no considerado estructural; no se incluye en la sección resistente.")
+    elif card.get("bastidor_lateral_included"):
+        optional_status.append(
+            f"Bastidor lateral: incluido en la sección resistente. Altura: {_fmt_num(card.get('bastidor_lateral_height_mm'), 2)} mm."
+        )
+    else:
+        optional_status.append("Bastidor lateral: activo, pero no incluido en esta sección.")
+
+    if not card.get("include_piso"):
+        optional_status.append("Piso: no activado.")
+    elif not card.get("piso_structural"):
+        optional_status.append("Piso: activado, pero no considerado estructural; no se incluye en la sección resistente.")
+    elif card.get("piso_included"):
+        optional_status.append(
+            "Piso: incluido en la sección resistente. "
+            f"Material: {str(card.get('material_piso', '-') or '-')}, "
+            f"espesor: {_fmt_num(card.get('espesor_piso'), 4)} mm, "
+            f"ancho: {_fmt_num(card.get('ancho_piso'), 2)} mm."
+        )
+    else:
+        optional_status.append("Piso: activo, pero no incluido en esta sección.")
+
+    if not card.get("include_chapon"):
+        optional_status.append("Chapón: no activado.")
+    elif card.get("chapon_context_error"):
+        optional_status.append("Chapón: activo, pero no verificable por falta de contexto longitudinal.")
+        missing_fields = [str(field) for field in list(card.get("chapon_context_missing_fields") or []) if str(field).strip()]
+        optional_status.append(f"Campos faltantes del chapón: {', '.join(missing_fields) if missing_fields else 'No informado'}.")
+    elif card.get("chapon_included"):
+        optional_status.append(
+            "Chapón: incluido en esta estación. "
+            f"Material: {str(card.get('material_chapon', 'SAE1010') or 'SAE1010')}, "
+            f"espesor: {_fmt_num(card.get('espesor_chapon'), 4)} mm, "
+            f"ancho: {_fmt_num(card.get('ancho_chapon'), 2)} mm, "
+            f"tramo: 0 a {_fmt_num(card.get('chapon_x_end_mm'), 0)} mm."
+        )
+    elif _safe_float(card.get("x_mm")) is None:
+        optional_status.append("Chapón: activo, pero no incluido porque falta la estación x de la fila.")
+    else:
+        optional_status.append("Chapón: activo, pero no incluido porque la estación x está fuera del tramo longitudinal del chapón.")
+    for text in optional_status:
+        _add_paragraph(doc, text, font_size=8.8, color="111827", spacing_after_pt=2)
+
+    material_error = bool(card.get("material_error"))
+    chapon_context_error = bool(card.get("chapon_context_error"))
+    fs_text = str(card.get("fs_text") or "").strip()
+    if material_error or chapon_context_error:
+        if material_error:
+            _add_paragraph(
+                doc,
+                "ERR MAT - Sección no verificable por material faltante",
+                bold=True,
+                font_size=9.3,
+                color="B00020",
+                spacing_after_pt=3,
+            )
+            missing_components = [row for row in list(card.get("missing_material_components") or []) if isinstance(row, dict)]
+            if missing_components:
+                rows = []
+                for row in missing_components:
+                    component = str(row.get("component", "-") or "-")
+                    material = str(row.get("material", "-") or "-")
+                    rows.append((component, f"{material}: sin tensión admisible en la base de materiales"))
+                _add_kv_table(doc, rows)
+            else:
+                _add_kv_table(doc, [("Componentes con material faltante", "No informado")])
+            _add_paragraph(
+                doc,
+                "Debe corregirse la base de materiales antes de validar la sección.",
+                font_size=8.9,
+                color="111827",
+                spacing_after_pt=4,
+            )
+            _add_component_check_table(doc, list(card.get("component_checks") or []), fs_required)
+        if chapon_context_error:
+            _add_paragraph(
+                doc,
+                "ERR CHAPÓN - Sección no verificable por falta de contexto longitudinal",
+                bold=True,
+                font_size=9.3,
+                color="B00020",
+                spacing_after_pt=3,
+            )
+            missing_fields = [str(field) for field in list(card.get("chapon_context_missing_fields") or []) if str(field).strip()]
+            fields_text = ", ".join(missing_fields) if missing_fields else "No informado"
+            _add_kv_table(doc, [("Campos faltantes", fields_text)])
+            _add_paragraph(
+                doc,
+                "Se debe definir largo de viga y posición de perno para determinar si el chapón aplica.",
+                font_size=8.9,
+                color="111827",
+                spacing_after_pt=4,
+            )
+        if fs_text:
+            _add_kv_table(doc, [("Estado de verificación", fs_text)])
+        return
     _add_paragraph(doc, "Desarrollo geométrico y resistente", bold=True, font_size=9.3, color="334155", spacing_after_pt=3)
-    for eq in [
-        f"H = t_inf + h_web + t_sup = {_fmt_num(card.get('t_bot_mm'), 2)} + {_fmt_num(card.get('h_web_mm'), 2)} + {_fmt_num(card.get('t_top_mm'), 2)} = {_fmt_num(card.get('h_total_mm'), 2)} mm",
-        f"y_bar = sum(A_i * y_i) / sum(A_i) = {_fmt_num(card.get('ybar_cm'), 4)} cm",
-        f"I_x,1 viga = {_fmt_num(card.get('ix_single_cm4'), 4)} cm^4",
-        f"I_x,total = n * I_x,1 viga = {_fmt_num(card.get('ix_total_cm4'), 4)} cm^4",
-        f"W_crit = I_x,total / c_max = {_fmt_num(card.get('wcrit_cm3'), 4)} cm^3",
-    ]:
+    if card.get("bastidor_lateral_included") or card.get("piso_included") or card.get("chapon_included"):
+        equations = [
+            f"H_comp = {_fmt_num(card.get('h_total_mm'), 2)} mm",
+            f"y_bar = sum(A_i * y_i) / sum(A_i) = {_fmt_num(card.get('ybar_cm'), 4)} cm",
+            f"I_x,seccion compuesta = sum(I_x,i + A_i * d_i^2) = {_fmt_num(card.get('ix_total_cm4'), 4)} cm^4",
+            f"W_crit = I_x,seccion compuesta / c_max = {_fmt_num(card.get('wcrit_cm3'), 4)} cm^3",
+        ]
+    else:
+        equations = [
+            f"H = t_inf + h_web + t_sup = {_fmt_num(card.get('t_bot_mm'), 2)} + {_fmt_num(card.get('h_web_mm'), 2)} + {_fmt_num(card.get('t_top_mm'), 2)} = {_fmt_num(card.get('h_total_mm'), 2)} mm",
+            f"y_bar = sum(A_i * y_i) / sum(A_i) = {_fmt_num(card.get('ybar_cm'), 4)} cm",
+            f"I_x,1 viga = {_fmt_num(card.get('ix_single_cm4'), 4)} cm^4",
+            f"I_x,total = n * I_x,1 viga = {_fmt_num(card.get('ix_total_cm4'), 4)} cm^4",
+            f"W_crit = I_x,total / c_max = {_fmt_num(card.get('wcrit_cm3'), 4)} cm^3",
+        ]
+    for eq in equations:
         _add_equation_paragraph(doc, eq)
     if card.get("moment_kgcm") is not None:
         _add_paragraph(doc, "Verificación a flexión", bold=True, font_size=9.3, color="334155", spacing_after_pt=3)
-        result_fs = _safe_float(getattr(card.get("result"), "FS", None))
+        component_checks = list(card.get("component_checks") or [])
+        governing_component = card.get("governing_component") or {}
+        result_fs = _safe_float(governing_component.get("fs"))
+        if result_fs is None:
+            result_fs = _safe_float(getattr(card.get("result"), "FS", None))
         result_wreq = _safe_float(getattr(card.get("result"), "Wreq_cm3", None))
         if result_fs is None:
             fs_values = [v for v in (_safe_float(card.get("fs_top")), _safe_float(card.get("fs_bot"))) if v is not None]
             result_fs = min(fs_values) if fs_values else 0.0
-        if result_wreq is None:
+        wreq_values = [_safe_float(row.get("wreq_cm3")) for row in component_checks if isinstance(row, dict)]
+        wreq_values = [v for v in wreq_values if v is not None]
+        if wreq_values:
+            result_wreq = max(wreq_values)
+        elif result_wreq is None:
             wreq_values = [v for v in (_safe_float(card.get("wreq_top_cm3")), _safe_float(card.get("wreq_bot_cm3"))) if v is not None]
             result_wreq = max(wreq_values) if wreq_values else 0.0
         for eq in [
             f"sigma_sup = M * c_sup / I_x,total = {_fmt_num(card.get('sigma_top_kgcm2'), 4)} kg/cm^2",
             f"sigma_inf = M * c_inf / I_x,total = {_fmt_num(card.get('sigma_bot_kgcm2'), 4)} kg/cm^2",
+            "sigma_i = M * c_i / I_x,total para cada componente",
             f"W_req = {_fmt_num(result_wreq, 4)} cm^3",
             f"FS = {_fmt_num(result_fs, 4)}",
         ]:
             _add_equation_paragraph(doc, eq)
+        _add_component_check_table(doc, component_checks, fs_required)
         compliance = float(result_fs or 0.0) >= float(fs_required)
+        gov_text = ""
+        if governing_component:
+            gov_text = (
+                f" Gobierna: {governing_component.get('component', '-')}"
+                f" ({governing_component.get('material', '-')})."
+            )
         _add_paragraph(
             doc,
-            f"Conclusión: la sección {sec} {'CUMPLE' if compliance else 'NO CUMPLE'} la verificación a flexión respecto del FS mínimo exigido de {_fmt_num(fs_required, 2)}.",
+            f"Conclusión: la sección {sec} {'CUMPLE' if compliance else 'NO CUMPLE'} la verificación a flexión respecto del FS mínimo exigido de {_fmt_num(fs_required, 2)}.{gov_text}",
             bold=True,
             font_size=9.2,
             color="0A7F2E" if compliance else "B00020",

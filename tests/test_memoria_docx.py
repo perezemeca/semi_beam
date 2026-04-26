@@ -24,6 +24,17 @@ def _write_png(path: str) -> None:
         fh.write(_PNG_1X1)
 
 
+def _document_xml(path) -> str:
+    with zipfile.ZipFile(path) as zf:
+        return zf.read("word/document.xml").decode("utf-8")
+
+
+def _export_with_verification(tmp_path, verification: dict) -> str:
+    out = tmp_path / "memoria.docx"
+    export_memoria_docx(out, verification=verification)
+    return _document_xml(out)
+
+
 def test_export_memoria_docx_includes_deflection_image():
     with tempfile.TemporaryDirectory() as td:
         out = os.path.join(td, "memoria.docx")
@@ -90,3 +101,135 @@ def test_export_memoria_docx_includes_deflection_image():
         assert "es-AR" in core_xml
         assert "en-US" not in document_xml
         assert "en-US" not in styles_xml
+
+
+def test_docx_renders_non_verifiable_material_error(tmp_path):
+    xml = _export_with_verification(
+        tmp_path,
+        {
+            "fs_required": 1.5,
+            "n_beams": 1,
+            "cards": [
+                {
+                    "sec": "1",
+                    "fs_text": "ERR MAT",
+                    "ok": False,
+                    "material_error": True,
+                    "missing_material_components": [
+                        {"component": "Bastidor lateral", "material": "SAE1010"},
+                    ],
+                    "component_checks": [
+                        {
+                            "component": "Bastidor lateral",
+                            "material": "SAE1010",
+                            "y_inf_cm": 0.0,
+                            "y_sup_cm": 17.0,
+                            "cmax_cm": 8.5,
+                            "sigma_calc_kgcm2": 1200.0,
+                            "sigma_adm_kgcm2": None,
+                            "fs": None,
+                        },
+                    ],
+                }
+            ],
+        },
+    )
+
+    assert "ERR MAT" in xml
+    assert "Sección no verificable" in xml
+    assert "MATERIAL FALTANTE" in xml
+    assert "FS = 0.0000" not in xml
+    assert "FS = 0,0000" not in xml
+
+
+def test_docx_renders_non_verifiable_chapon_context_error(tmp_path):
+    xml = _export_with_verification(
+        tmp_path,
+        {
+            "fs_required": 1.5,
+            "n_beams": 1,
+            "cards": [
+                {
+                    "sec": "1",
+                    "fs_text": "ERR CHAPÓN",
+                    "ok": False,
+                    "chapon_context_error": True,
+                    "chapon_context_missing_fields": ["largo_viga_mm", "posicion_perno_mm"],
+                }
+            ],
+        },
+    )
+
+    assert "ERR CHAPÓN" in xml
+    assert "contexto longitudinal" in xml
+    assert "largo_viga_mm" in xml
+    assert "posicion_perno_mm" in xml
+    assert "FS = 0.0000" not in xml
+    assert "FS = 0,0000" not in xml
+
+
+def test_docx_renders_table_values(tmp_path):
+    xml = _export_with_verification(
+        tmp_path,
+        {
+            "fs_required": 1.5,
+            "n_beams": 1,
+            "cards": [
+                {
+                    "sec": "1",
+                    "fs_text": "2.31",
+                    "ok": True,
+                    "table_values": {
+                        "FS": "2.31",
+                        "Jx_cm4": "12345.67",
+                        "ybar_cm": "12.34",
+                        "cmax_cm": "56.78",
+                        "Wcrit_cm3": "987.65",
+                        "Wreq_cm3": "432.10",
+                        "sigma_max_kgcm2": "1500",
+                    },
+                }
+            ],
+        },
+    )
+
+    assert "Resultado mostrado en tabla" in xml
+    assert "2.31" in xml
+    assert "12345.67" in xml
+    assert "987.65" in xml
+    assert "432.10" in xml
+    assert "1500" in xml
+
+
+def test_docx_renders_optional_component_status(tmp_path):
+    xml = _export_with_verification(
+        tmp_path,
+        {
+            "fs_required": 1.5,
+            "n_beams": 1,
+            "cards": [
+                {
+                    "sec": "1",
+                    "x_mm": "2500",
+                    "fs_text": "2.31",
+                    "ok": True,
+                    "include_bastidor_lateral": True,
+                    "bastidor_lateral_structural": False,
+                    "bastidor_lateral_included": False,
+                    "include_piso": True,
+                    "piso_structural": False,
+                    "piso_included": False,
+                    "include_chapon": True,
+                    "chapon_included": False,
+                    "chapon_context_error": False,
+                }
+            ],
+        },
+    )
+
+    assert "Estado de componentes opcionales" in xml
+    assert "Bastidor lateral" in xml
+    assert "no considerado estructural" in xml
+    assert "Piso" in xml
+    assert "Chapón" in xml
+    assert "fuera del tramo" in xml
