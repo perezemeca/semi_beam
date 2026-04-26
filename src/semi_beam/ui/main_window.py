@@ -208,7 +208,7 @@ def _fmt_plain(v, decimals: int = 2) -> str:
 
 
 
-APP_VERSION = "0.2.0"
+APP_VERSION = "1.0.0"
 APP_TITLE_BASE = "Calculeitor - Acoplado / Semirremolque / Bitren"
 MEMORIA_EXPORT_IMAGE_DPI = 220
 
