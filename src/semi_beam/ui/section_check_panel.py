@@ -598,6 +598,17 @@ class SectionCheckPanel(QWidget):
             return None
         return min(float(self._beam_length_mm), float(self._king_pin_mm) + CHAPON_EXTENSION_PERNO_MM)
 
+    def _chapon_context_missing_fields(self) -> list[str]:
+        missing: list[str] = []
+        if self._beam_length_mm is None:
+            missing.append("largo_viga_mm")
+        if self._king_pin_mm is None:
+            missing.append("posicion_perno_mm")
+        return missing
+
+    def _chapon_context_missing(self) -> bool:
+        return bool(self.chk_chapon.isChecked()) and bool(self._chapon_context_missing_fields())
+
     def _include_chapon_in_geometry(self, station_mm: Optional[float]) -> bool:
         if not bool(self.chk_chapon.isChecked()):
             return False
@@ -1184,6 +1195,12 @@ class SectionCheckPanel(QWidget):
                     self._set_row_color(r, ok=None)
                     continue
 
+                if self._chapon_context_missing():
+                    self._clear_out_cells(r)
+                    self._set_out_cell(r, self.COL_FS, "ERR CHAPÓN")
+                    self._set_row_color(r, ok=False)
+                    continue
+
                 sec = self._make_section(hweb, tweb_in, station_mm=x_value)
                 s_top_calc = self._top_sigma_for_section(sec, s_top, s_piso)
                 s_bot_calc = self._bottom_sigma_for_section(sec, s_bot, s_chapon)
@@ -1371,6 +1388,8 @@ class SectionCheckPanel(QWidget):
             fs_text = _get_text(self.tbl, r, self.COL_FS)
             fs_value = _try_float(fs_text)
             M_value = _try_float(_get_text(self.tbl, r, self.COL_M))
+            chapon_context_error = self._chapon_context_missing()
+            chapon_context_missing_fields = self._chapon_context_missing_fields() if chapon_context_error else []
             V_value = None
             if self._shear_provider is not None and x_value is not None:
                 try:
@@ -1413,7 +1432,16 @@ class SectionCheckPanel(QWidget):
             component_checks = self._component_flex_checks(sec, M_value)
             missing_materials = self._missing_material_components(component_checks)
             governing_component = self._governing_component_check(component_checks)
-            if missing_materials:
+            if chapon_context_error:
+                fs_value = None
+                fs_text = "ERR CHAPÓN"
+                res = None
+                wreq_top = None
+                wreq_bot = None
+                fs_top = None
+                fs_bot = None
+                governing_component = None
+            elif missing_materials:
                 fs_value = None
                 fs_text = "ERR MAT"
                 res = None
@@ -1457,6 +1485,8 @@ class SectionCheckPanel(QWidget):
                     "ancho_piso": PISO_ANCHO_MM,
                     "include_chapon": bool(self.chk_chapon.isChecked()),
                     "chapon_included": isinstance(sec, CompositeSection) and sec.includes_chapon,
+                    "chapon_context_error": bool(chapon_context_error),
+                    "chapon_context_missing_fields": chapon_context_missing_fields,
                     "material_chapon": CHAPON_MATERIAL_ID,
                     "espesor_chapon": self._current_chapon_thickness_mm(),
                     "ancho_chapon": CHAPON_ANCHO_MM,
@@ -1653,6 +1683,8 @@ class SectionCheckPanel(QWidget):
             "ancho_piso": PISO_ANCHO_MM,
             "include_chapon": bool(self.chk_chapon.isChecked()),
             "chapon_included": bool(self.chk_chapon.isChecked() and self._chapon_end_mm() is not None),
+            "chapon_context_error": bool(self._chapon_context_missing()),
+            "chapon_context_missing_fields": self._chapon_context_missing_fields() if self._chapon_context_missing() else [],
             "material_chapon": CHAPON_MATERIAL_ID,
             "espesor_chapon": self._current_chapon_thickness_mm(),
             "ancho_chapon": CHAPON_ANCHO_MM,
@@ -1745,6 +1777,8 @@ class SectionCheckPanel(QWidget):
             "espesor_piso": self._current_piso_thickness_mm(),
             "ancho_piso": PISO_ANCHO_MM,
             "include_chapon": bool(self.chk_chapon.isChecked()),
+            "chapon_context_error": bool(self._chapon_context_missing()),
+            "chapon_context_missing_fields": self._chapon_context_missing_fields() if self._chapon_context_missing() else [],
             "material_chapon": CHAPON_MATERIAL_ID,
             "espesor_chapon": self._current_chapon_thickness_mm(),
             "ancho_chapon": CHAPON_ANCHO_MM,
