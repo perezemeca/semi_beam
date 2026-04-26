@@ -320,11 +320,9 @@ class SectionCheckPanel(QWidget):
             cmb.setStyleSheet(combo_cell_style(TABLE_INPUT_BG))
             cmb.currentTextChanged.connect(lambda _t, rr=r: self._schedule_recompute())
             cmb.currentTextChanged.connect(lambda _t: self._emit_inertia_inputs_changed())
+            cmb.currentTextChanged.connect(lambda _t, rr=r: self._repaint_preview_from_selection() if rr == self.tbl.currentRow() else None)
             self.tbl.setCellWidget(r, self.COL_TWEB, cmb)
             self._tweb_widgets.append(cmb)
-            # cuando cambia t_web (combo), ya tenías schedule; sumá repaint si es la fila actual
-            for r, cmb in enumerate(self._tweb_widgets):
-                cmb.currentTextChanged.connect(lambda _t, rr=r: self._repaint_preview_from_selection() if rr == self.tbl.currentRow() else None)
 
         # Delegates numéricos
         self.tbl.setItemDelegateForColumn(self.COL_X, NullableFloatDelegate(self, decimals=2, minv=-1e12, maxv=1e12))
@@ -1302,8 +1300,6 @@ class SectionCheckPanel(QWidget):
 
                 fs = _try_float(_get_text(self.tbl, r, self.COL_FS))
                 row_ok.append(bool(fs is not None and fs >= nmin))
-
-            import matplotlib.pyplot as plt
 
             fig = plt.Figure(figsize=(14.8, 2.2 + 0.32 * len(data)), dpi=200)
             ax = fig.add_subplot(111)
