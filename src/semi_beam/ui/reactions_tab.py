@@ -463,6 +463,11 @@ class SemiTrailerReactionsTab(QWidget):
 
     def set_diag(self, diag):
         self._last_diag = diag
+        perno_mm = float(self.x_a.value()) if self.mode.currentIndex() == 0 else float(self.x_k.value())
+        self.section_panel.set_beam_context(
+            largo_viga_mm=float(self.L.value()),
+            posicion_perno_mm=perno_mm,
+        )
         if diag is None:
             self.section_panel.set_moment_provider(None)
             self.section_panel.set_shear_provider(None)

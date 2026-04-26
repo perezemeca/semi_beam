@@ -7,6 +7,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from docx import Document
 from PySide6.QtWidgets import QApplication
 
+from semi_beam.sections.i_section import ISection
 from semi_beam.services.study_storage import load_study_file, save_study_file
 from semi_beam.ui.main_window import FBDApp
 from semi_beam.ui.section_check_panel import SectionCheckPanel
@@ -30,6 +31,146 @@ def test_section_panel_exposes_new_thickness_options():
     assert "7/16" in web_options
     assert panel.cmb_t_top.itemText(panel.cmb_t_top.findData("7/16")) == "7/16 - 11.11 mm"
     assert not hasattr(panel, "btn_export_report")
+    assert panel.chk_bastidor_lateral.text() == "Agregar bastidor lateral"
+    assert panel.chk_bastidor_lateral.isChecked() is False
+    assert panel.chk_bastidor_lateral_structural.isChecked() is True
+    assert panel.n_bastidor_lateral_altura.minimum() == 130.0
+    assert panel.n_bastidor_lateral_altura.maximum() == 170.0
+    assert panel.n_bastidor_lateral_altura.value() == 170.0
+    piso_options = {panel.cmb_espesor_piso.itemData(i) for i in range(panel.cmb_espesor_piso.count())}
+    assert panel.chk_piso.text() == "Agregar piso"
+    assert panel.chk_piso.isChecked() is False
+    assert panel.chk_piso_structural.isChecked() is True
+    assert {2.0, 3.0, 4.0, 3.175, 4.7625}.issubset(piso_options)
+    assert panel.cmb_mat_piso.count() == panel.cmb_mat_top.count()
+    chapon_options = {panel.cmb_espesor_chapon.itemData(i) for i in range(panel.cmb_espesor_chapon.count())}
+    assert panel.chk_chapon.text() == "Agregar chapón"
+    assert panel.chk_chapon.isChecked() is False
+    assert {6.35, 7.9375, 9.525}.issubset(chapon_options)
+
+
+def test_section_panel_adds_lateral_frame_only_when_structural():
+    _app()
+    panel = SectionCheckPanel()
+    panel.set_moment_provider(lambda _x_mm: 125000.0)
+    panel.tbl.item(0, panel.COL_X).setText("1000")
+    panel.tbl.item(0, panel.COL_HWEB).setText("450")
+    panel._recompute_all()
+    base_jx = float(panel.tbl.item(0, panel.COL_JX).text())
+
+    panel.chk_bastidor_lateral.setChecked(True)
+    panel.chk_bastidor_lateral_structural.setChecked(False)
+    panel._recompute_all()
+    non_structural_jx = float(panel.tbl.item(0, panel.COL_JX).text())
+
+    panel.chk_bastidor_lateral_structural.setChecked(True)
+    panel.n_bastidor_lateral_altura.setValue(150.0)
+    panel._recompute_all()
+    structural_jx = float(panel.tbl.item(0, panel.COL_JX).text())
+
+    assert non_structural_jx == base_jx
+    assert structural_jx > base_jx
+
+
+def test_section_panel_adds_floor_only_when_structural():
+    _app()
+    panel = SectionCheckPanel()
+    panel.set_moment_provider(lambda _x_mm: 125000.0)
+    panel.tbl.item(0, panel.COL_X).setText("1000")
+    panel.tbl.item(0, panel.COL_HWEB).setText("450")
+    panel._recompute_all()
+    base_jx = float(panel.tbl.item(0, panel.COL_JX).text())
+
+    panel.chk_piso.setChecked(True)
+    panel.chk_piso_structural.setChecked(False)
+    panel._recompute_all()
+    non_structural_jx = float(panel.tbl.item(0, panel.COL_JX).text())
+
+    panel.chk_piso_structural.setChecked(True)
+    panel.cmb_espesor_piso.setCurrentIndex(panel.cmb_espesor_piso.findData(4.7625))
+    panel._recompute_all()
+    structural_jx = float(panel.tbl.item(0, panel.COL_JX).text())
+    sec = panel._make_section(450.0, 0.25)
+    piso_rects = [r for r in sec.rects if r.label == "piso"]
+
+    assert non_structural_jx == base_jx
+    assert structural_jx > base_jx
+    assert sec.includes_piso is True
+    assert len(piso_rects) == 1
+    assert piso_rects[0].x0_mm == -1215.0
+    assert piso_rects[0].b_mm == 2430.0
+    assert piso_rects[0].y0_mm == sec.base_section.H_mm
+    assert piso_rects[0].h_mm == 4.7625
+
+
+def test_section_panel_adds_chapon_only_inside_longitudinal_range():
+    _app()
+    panel = SectionCheckPanel()
+    panel.set_beam_context(largo_viga_mm=5000.0, posicion_perno_mm=1000.0)
+    panel.set_moment_provider(lambda _x_mm: 125000.0)
+    panel.tbl.item(0, panel.COL_X).setText("1500")
+    panel.tbl.item(0, panel.COL_HWEB).setText("450")
+    panel.tbl.item(1, panel.COL_X).setText("2500")
+    panel.tbl.item(1, panel.COL_HWEB).setText("450")
+    panel._recompute_all()
+    base_inside_jx = float(panel.tbl.item(0, panel.COL_JX).text())
+    base_outside_jx = float(panel.tbl.item(1, panel.COL_JX).text())
+
+    panel.chk_chapon.setChecked(True)
+    panel.cmb_espesor_chapon.setCurrentIndex(panel.cmb_espesor_chapon.findData(9.525))
+    panel._recompute_all()
+    inside_jx = float(panel.tbl.item(0, panel.COL_JX).text())
+    outside_jx = float(panel.tbl.item(1, panel.COL_JX).text())
+    inside_sec = panel._make_section(450.0, 0.25, station_mm=1500.0)
+    outside_sec = panel._make_section(450.0, 0.25, station_mm=2500.0)
+    chapon_rects = [r for r in inside_sec.rects if r.label == "chapon"]
+
+    assert inside_jx > base_inside_jx
+    assert outside_jx == base_outside_jx
+    assert inside_sec.includes_chapon is True
+    assert isinstance(outside_sec, ISection)
+    assert len(chapon_rects) == 1
+    assert chapon_rects[0].x0_mm == -525.0
+    assert chapon_rects[0].b_mm == 1050.0
+    assert chapon_rects[0].y0_mm == -9.525
+    assert chapon_rects[0].h_mm == 9.525
+
+
+def test_section_panel_governs_by_component_when_all_reinforcements_are_active():
+    _app()
+    panel = SectionCheckPanel()
+    panel.set_beam_context(largo_viga_mm=5000.0, posicion_perno_mm=1000.0)
+    panel.set_moment_provider(lambda _x_mm: 250000.0)
+    for combo, mat_id in (
+        (panel.cmb_mat_top, "STR900MC"),
+        (panel.cmb_mat_bot, "STR900MC"),
+        (panel.cmb_mat_web, "STR900MC"),
+        (panel.cmb_mat_piso, "STR900MC"),
+    ):
+        idx = combo.findData(mat_id)
+        if idx >= 0:
+            combo.setCurrentIndex(idx)
+    panel.chk_bastidor_lateral.setChecked(True)
+    panel.chk_piso.setChecked(True)
+    panel.chk_chapon.setChecked(True)
+    panel.tbl.item(0, panel.COL_X).setText("1500")
+    panel.tbl.item(0, panel.COL_HWEB).setText("450")
+
+    panel._recompute_all()
+    card = panel._collect_section_export_cards()[0]
+    checks = card["component_checks"]
+    governing = card["governing_component"]
+    fs_cell = float(panel.tbl.item(0, panel.COL_FS).text())
+
+    components = {(row["component"], row["material"]) for row in checks}
+    expected_min_fs = min(float(row["fs"]) for row in checks if row["fs"] is not None)
+
+    assert ("Bastidor lateral", "SAE1010") in components
+    assert ("Chapón", "SAE1010") in components
+    assert ("Piso", "STR900MC") in components
+    assert governing is not None
+    assert abs(float(governing["fs"]) - expected_min_fs) < 1e-9
+    assert abs(fs_cell - expected_min_fs) < 0.02
 
 
 def test_section_panel_exports_verification_report(tmp_path):
@@ -100,6 +241,13 @@ def test_study_file_roundtrip_restores_ui_state(tmp_path):
     semi.tbl_points.item(0, 1).setText("2500")
     semi.tbl_points.item(0, 2).setText("5000")
     semi.section_panel.cmb_t_top.setCurrentIndex(semi.section_panel.cmb_t_top.findData("7/16"))
+    semi.section_panel.chk_bastidor_lateral.setChecked(True)
+    semi.section_panel.n_bastidor_lateral_altura.setValue(150.0)
+    semi.section_panel.chk_piso.setChecked(True)
+    semi.section_panel.cmb_espesor_piso.setCurrentIndex(semi.section_panel.cmb_espesor_piso.findData(3.175))
+    semi.section_panel.cmb_mat_piso.setCurrentIndex(semi.section_panel.cmb_mat_piso.findData("F24"))
+    semi.section_panel.chk_chapon.setChecked(True)
+    semi.section_panel.cmb_espesor_chapon.setCurrentIndex(semi.section_panel.cmb_espesor_chapon.findData(7.9375))
     semi.section_panel.tbl.item(0, semi.section_panel.COL_X).setText("1000")
     semi.section_panel.tbl.item(0, semi.section_panel.COL_HWEB).setText("450")
 
@@ -126,6 +274,15 @@ def test_study_file_roundtrip_restores_ui_state(tmp_path):
     assert restored_semi.tbl_points.item(0, 1).text() == "2500"
     assert restored_semi.tbl_points.item(0, 2).text() == "5000"
     assert restored_semi.section_panel.cmb_t_top.currentData() == "7/16"
+    assert restored_semi.section_panel.chk_bastidor_lateral.isChecked() is True
+    assert restored_semi.section_panel.chk_bastidor_lateral_structural.isChecked() is True
+    assert restored_semi.section_panel.n_bastidor_lateral_altura.value() == 150.0
+    assert restored_semi.section_panel.chk_piso.isChecked() is True
+    assert restored_semi.section_panel.chk_piso_structural.isChecked() is True
+    assert restored_semi.section_panel.cmb_espesor_piso.currentData() == 3.175
+    assert restored_semi.section_panel.cmb_mat_piso.currentData() == "F24"
+    assert restored_semi.section_panel.chk_chapon.isChecked() is True
+    assert restored_semi.section_panel.cmb_espesor_chapon.currentData() == 7.9375
     assert restored_semi.section_panel.tbl.item(0, restored_semi.section_panel.COL_X).text() == "1000"
     assert restored_semi.section_panel.tbl.item(0, restored_semi.section_panel.COL_HWEB).text() == "450"
     assert restored_reactions.mode.currentIndex() == 1
