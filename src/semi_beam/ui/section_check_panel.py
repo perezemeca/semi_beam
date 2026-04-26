@@ -42,14 +42,6 @@ from semi_beam.ui.numeric_delegate import (
 from semi_beam.materials.material_db import MaterialDB, default_materials_path
 
 
-DOCX_A4_WIDTH_MM = 210.0
-DOCX_A4_HEIGHT_MM = 297.0
-DOCX_MARGIN_MM = 25.4
-DOCX_USABLE_WIDTH_MM = DOCX_A4_WIDTH_MM - (2.0 * DOCX_MARGIN_MM)
-DOCX_CARD_COLUMNS = 2
-DOCX_CARD_CELL_WIDTH_MM = DOCX_USABLE_WIDTH_MM / DOCX_CARD_COLUMNS
-DOCX_CARD_IMAGE_WIDTH_MM = 62.0
-
 BASTIDOR_LATERAL_DISTANCIA_MM = 1250.0
 BASTIDOR_LATERAL_ESPESOR_MM = 4.7625
 BASTIDOR_LATERAL_ALA_MM = 45.0
@@ -972,8 +964,8 @@ class SectionCheckPanel(QWidget):
             return
         self.ax.set_xlim(*self._preview_home_xlim)
         self.ax.set_ylim(*self._preview_home_ylim)
-        self._preview_current_xlim = self._preview_home_xlim
-        self._preview_current_ylim = self._preview_home_ylim
+        self._preview_current_xlim = tuple(float(v) for v in self.ax.get_xlim())
+        self._preview_current_ylim = tuple(float(v) for v in self.ax.get_ylim())
         self._preview_user_view_dirty = False
         self.canvas.draw_idle()
 
@@ -1003,8 +995,8 @@ class SectionCheckPanel(QWidget):
         new_ylim = (y_center - rel_y * new_h, y_center + (1.0 - rel_y) * new_h)
         self.ax.set_xlim(*new_xlim)
         self.ax.set_ylim(*new_ylim)
-        self._preview_current_xlim = tuple(float(v) for v in new_xlim)
-        self._preview_current_ylim = tuple(float(v) for v in new_ylim)
+        self._preview_current_xlim = tuple(float(v) for v in self.ax.get_xlim())
+        self._preview_current_ylim = tuple(float(v) for v in self.ax.get_ylim())
         self._preview_user_view_dirty = True
         self.canvas.draw_idle()
 
@@ -1044,8 +1036,8 @@ class SectionCheckPanel(QWidget):
         new_ylim = (y0 + dy, y1 + dy)
         self.ax.set_xlim(*new_xlim)
         self.ax.set_ylim(*new_ylim)
-        self._preview_current_xlim = tuple(float(v) for v in new_xlim)
-        self._preview_current_ylim = tuple(float(v) for v in new_ylim)
+        self._preview_current_xlim = tuple(float(v) for v in self.ax.get_xlim())
+        self._preview_current_ylim = tuple(float(v) for v in self.ax.get_ylim())
         self._preview_user_view_dirty = True
         self.canvas.draw_idle()
 
