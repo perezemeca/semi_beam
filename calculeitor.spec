@@ -4,7 +4,7 @@ from pathlib import Path
 
 block_cipher = None
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(SPECPATH).resolve()
 
 datas = [
     (str(ROOT / "src" / "semi_beam" / "data" / "materials_kgcm2.txt"), "semi_beam/data"),
@@ -14,7 +14,10 @@ datas = [
 
 a = Analysis(
     [str(ROOT / "scripts" / "run_app.py")],
-    pathex=[str(ROOT), str(ROOT / "src")],
+    pathex=[
+        str(ROOT / "src"),
+        str(ROOT),
+    ],
     binaries=[],
     datas=datas,
     hiddenimports=[],
