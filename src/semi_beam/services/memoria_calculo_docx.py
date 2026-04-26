@@ -423,6 +423,7 @@ def _add_component_check_table(doc, checks: Sequence[Dict[str, Any]], fs_require
     for row_idx, check in enumerate(checks, start=1):
         fs = _safe_float(check.get("fs"))
         ok = fs is not None and fs >= float(fs_required)
+        material_missing = check.get("sigma_adm_kgcm2") is None
         row_values = [
             str(check.get("component", "-") or "-"),
             str(check.get("material", "-") or "-"),
@@ -432,7 +433,7 @@ def _add_component_check_table(doc, checks: Sequence[Dict[str, Any]], fs_require
             _fmt_num(check.get("sigma_calc_kgcm2"), 2),
             "-" if check.get("sigma_adm_kgcm2") is None else _fmt_num(check.get("sigma_adm_kgcm2"), 2),
             "-" if fs is None else _fmt_num(fs, 3),
-            "CUMPLE" if ok else "NO CUMPLE",
+            "MATERIAL FALTANTE" if material_missing else ("CUMPLE" if ok else "NO CUMPLE"),
         ]
         for col_idx, value in enumerate(row_values):
             cell = table.rows[row_idx].cells[col_idx]
@@ -491,6 +492,59 @@ def _add_row_memory(doc, card: Dict[str, Any], fs_required: float) -> None:
             ]
         )
     _add_kv_table(doc, kv_rows)
+    material_error = bool(card.get("material_error"))
+    chapon_context_error = bool(card.get("chapon_context_error"))
+    fs_text = str(card.get("fs_text") or "").strip()
+    if material_error or chapon_context_error:
+        if material_error:
+            _add_paragraph(
+                doc,
+                "ERR MAT - Sección no verificable por material faltante",
+                bold=True,
+                font_size=9.3,
+                color="B00020",
+                spacing_after_pt=3,
+            )
+            missing_components = [row for row in list(card.get("missing_material_components") or []) if isinstance(row, dict)]
+            if missing_components:
+                rows = []
+                for row in missing_components:
+                    component = str(row.get("component", "-") or "-")
+                    material = str(row.get("material", "-") or "-")
+                    rows.append((component, f"{material}: sin tensión admisible en la base de materiales"))
+                _add_kv_table(doc, rows)
+            else:
+                _add_kv_table(doc, [("Componentes con material faltante", "No informado")])
+            _add_paragraph(
+                doc,
+                "Debe corregirse la base de materiales antes de validar la sección.",
+                font_size=8.9,
+                color="111827",
+                spacing_after_pt=4,
+            )
+            _add_component_check_table(doc, list(card.get("component_checks") or []), fs_required)
+        if chapon_context_error:
+            _add_paragraph(
+                doc,
+                "ERR CHAPÓN - Sección no verificable por falta de contexto longitudinal",
+                bold=True,
+                font_size=9.3,
+                color="B00020",
+                spacing_after_pt=3,
+            )
+            missing_fields = [str(field) for field in list(card.get("chapon_context_missing_fields") or []) if str(field).strip()]
+            fields_text = ", ".join(missing_fields) if missing_fields else "No informado"
+            _add_kv_table(doc, [("Campos faltantes", fields_text)])
+            _add_paragraph(
+                doc,
+                "Se debe definir largo de viga y posición de perno para determinar si el chapón aplica.",
+                font_size=8.9,
+                color="111827",
+                spacing_after_pt=4,
+            )
+        if fs_text:
+            _add_kv_table(doc, [("Estado de verificación", fs_text)])
+        return
     _add_paragraph(doc, "Desarrollo geométrico y resistente", bold=True, font_size=9.3, color="334155", spacing_after_pt=3)
     if card.get("bastidor_lateral_included") or card.get("piso_included") or card.get("chapon_included"):
         equations = [
