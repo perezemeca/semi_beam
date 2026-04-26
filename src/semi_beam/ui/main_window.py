@@ -6,6 +6,7 @@ import os
 import tempfile
 from datetime import datetime
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import List, Optional, Tuple, Dict, Any
 
 import matplotlib
@@ -208,6 +209,7 @@ def _fmt_plain(v, decimals: int = 2) -> str:
 
 
 APP_VERSION = "0.2.0"
+APP_TITLE_BASE = "Calculeitor - Acoplado / Semirremolque / Bitren"
 MEMORIA_EXPORT_IMAGE_DPI = 220
 
 
@@ -1035,7 +1037,8 @@ class UnitTab(QWidget):
 class FBDApp(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle(f"calculeitor {APP_VERSION} - Acoplado / Semirremolque / Bitren")
+        self._current_study_path: Optional[str] = None
+        self._update_window_title()
         self.resize(1500, 850)
         try:
             self.setWindowIcon(QIcon(ensure_calculeitor_icon()))
@@ -1173,22 +1176,29 @@ class FBDApp(QMainWindow):
 
     def _build_about_menu(self) -> None:
         help_menu = self.menuBar().addMenu("Ayuda")
-        about_action = QAction("Acerca de calculeitor", self)
+        about_action = QAction("Acerca de Calculeitor", self)
         about_action.triggered.connect(self._show_about)
         help_menu.addAction(about_action)
 
     def _show_about(self) -> None:
         QMessageBox.about(
             self,
-            "Acerca de calculeitor",
+            "Acerca de Calculeitor",
             (
-                f"calculeitor {APP_VERSION}\n\n"
+                f"Calculeitor\nVersión {APP_VERSION}\n\n"
                 "Aplicación de escritorio para cálculo de vigas de acoplados, "
                 "semirremolques y bitrenes.\n\n"
                 "Incluye equilibrio, reacciones, diagramas V/M, deformada, "
                 "verificación de sección, estudios .sbeam y memoria de cálculo DOCX."
             ),
         )
+
+    def _update_window_title(self) -> None:
+        if self._current_study_path:
+            study_name = Path(self._current_study_path).stem
+            self.setWindowTitle(f"{APP_TITLE_BASE} — {study_name}")
+        else:
+            self.setWindowTitle(APP_TITLE_BASE)
 
     def active_tab(self):
         return self.tabs.currentWidget()
@@ -1241,6 +1251,8 @@ class FBDApp(QMainWindow):
             path += ".sbeam"
         try:
             save_study_file(path, self._export_study_state())
+            self._current_study_path = path
+            self._update_window_title()
             QMessageBox.information(self, "Guardar estudio", f"Estudio guardado en:\n{path}")
         except Exception as e:
             QMessageBox.critical(self, "Guardar estudio", f"No se pudo guardar el estudio: {e}")
@@ -1252,6 +1264,8 @@ class FBDApp(QMainWindow):
         try:
             state = load_study_file(path)
             self._apply_study_state(state)
+            self._current_study_path = path
+            self._update_window_title()
             QMessageBox.information(self, "Cargar estudio", f"Estudio cargado desde:\n{path}")
         except Exception as e:
             QMessageBox.critical(self, "Cargar estudio", f"No se pudo cargar el estudio: {e}")
@@ -2498,7 +2512,7 @@ class FBDApp(QMainWindow):
 
 def main():
     app = QApplication(sys.argv)
-    app.setApplicationName("calculeitor")
+    app.setApplicationName("Calculeitor")
     app.setApplicationVersion(APP_VERSION)
     try:
         app.setWindowIcon(QIcon(ensure_calculeitor_icon()))

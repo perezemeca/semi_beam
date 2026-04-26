@@ -287,3 +287,17 @@ def test_study_file_roundtrip_restores_ui_state(tmp_path):
     assert restored_semi.section_panel.tbl.item(0, restored_semi.section_panel.COL_HWEB).text() == "450"
     assert restored_reactions.mode.currentIndex() == 1
     assert restored_reactions.offset.value() == 3700.0
+
+
+def test_window_title_shows_current_study_filename(tmp_path):
+    _app()
+    window = FBDApp()
+
+    assert window.windowTitle() == "Calculeitor - Acoplado / Semirremolque / Bitren"
+
+    window._current_study_path = "C:/tmp/Forestal.sbeam"
+    window._update_window_title()
+
+    assert "Forestal" in window.windowTitle()
+    assert ".sbeam" not in window.windowTitle()
+    assert window.windowTitle() == "Calculeitor - Acoplado / Semirremolque / Bitren — Forestal"
