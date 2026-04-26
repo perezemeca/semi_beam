@@ -733,6 +733,19 @@ class SectionCheckPanel(QWidget):
             return None
         return min(valid, key=lambda row: float(row["fs"]))
 
+    def _missing_material_components(self, checks: list[dict[str, Any]]) -> list[dict[str, str]]:
+        missing: list[dict[str, str]] = []
+        for row in checks:
+            if row.get("sigma_adm_kgcm2") is not None:
+                continue
+            missing.append(
+                {
+                    "component": str(row.get("component", "")),
+                    "material": str(row.get("material", "")),
+                }
+            )
+        return missing
+
     # -------- Preview ----------
     def _draw_dim_v_on(self, ax, y1: float, y2: float, x_dim: float, x_obj: float, text: str, *, color="blue"):
         ax.plot([x_obj, x_dim], [y1, y1], color=color, linewidth=1.0)
@@ -1159,12 +1172,6 @@ class SectionCheckPanel(QWidget):
         s_piso = self._mat_sigma(self._current_material_id(self.cmb_mat_piso))
         s_chapon = self._mat_sigma(CHAPON_MATERIAL_ID)
 
-        if s_top is None or s_bot is None:
-            for r in range(self.tbl.rowCount()):
-                self._clear_out_cells(r)
-                self._set_row_color(r, ok=None)
-            return
-
         for r in range(self.tbl.rowCount()):
             try:
                 hweb = _try_float(_get_text(self.tbl, r, self.COL_HWEB))
@@ -1180,9 +1187,17 @@ class SectionCheckPanel(QWidget):
                 sec = self._make_section(hweb, tweb_in, station_mm=x_value)
                 s_top_calc = self._top_sigma_for_section(sec, s_top, s_piso)
                 s_bot_calc = self._bottom_sigma_for_section(sec, s_bot, s_chapon)
+                component_checks = self._component_flex_checks(sec, M)
+                missing_materials = self._missing_material_components(component_checks)
+                if missing_materials:
+                    self._clear_out_cells(r)
+                    self._set_out_cell(r, self.COL_FS, "ERR MAT")
+                    self._set_row_color(r, ok=False)
+                    continue
                 if s_top_calc is None or s_bot_calc is None:
                     self._clear_out_cells(r)
-                    self._set_row_color(r, ok=None)
+                    self._set_out_cell(r, self.COL_FS, "ERR MAT")
+                    self._set_row_color(r, ok=False)
                     continue
 
                 res = compute_flex_row(
@@ -1194,7 +1209,6 @@ class SectionCheckPanel(QWidget):
                     n_beams=self._calculation_n_beams(sec),
                     round_up_decimals=2,
                 )
-                component_checks = self._component_flex_checks(sec, M)
                 governing_component = self._governing_component_check(component_checks)
                 fs_final = float(governing_component["fs"]) if governing_component is not None else float(res.FS)
                 sigma_final = (
@@ -1397,8 +1411,18 @@ class SectionCheckPanel(QWidget):
             fs_top = (float(sigma_top_calc_adm) / max(sigma_top, 1e-12)) if (sigma_top_calc_adm is not None and sigma_top is not None) else None
             fs_bot = (float(sigma_bot_calc_adm) / max(sigma_bot, 1e-12)) if (sigma_bot_calc_adm is not None and sigma_bot is not None) else None
             component_checks = self._component_flex_checks(sec, M_value)
+            missing_materials = self._missing_material_components(component_checks)
             governing_component = self._governing_component_check(component_checks)
-            if governing_component is not None:
+            if missing_materials:
+                fs_value = None
+                fs_text = "ERR MAT"
+                res = None
+                wreq_top = None
+                wreq_bot = None
+                fs_top = None
+                fs_bot = None
+                governing_component = None
+            elif governing_component is not None:
                 fs_value = float(governing_component["fs"])
                 fs_text = _fmt2(fs_value)
                 wreq_values = [
@@ -1418,6 +1442,8 @@ class SectionCheckPanel(QWidget):
                     "t_web_in": self._current_tweb_in(r),
                     "fs_text": fs_text or "-",
                     "ok": fs_value is not None and fs_value >= nmin,
+                    "material_error": bool(missing_materials),
+                    "missing_material_components": missing_materials,
                     "section": sec,
                     "include_bastidor_lateral": bool(self.chk_bastidor_lateral.isChecked()),
                     "bastidor_lateral_structural": bool(self.chk_bastidor_lateral_structural.isChecked()),
