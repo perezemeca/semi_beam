@@ -55,7 +55,6 @@ def _draw_arrow(ax, x: float, y0: float, y1: float, style: RenderStyle):
             lw=style.arrow_lw,
             mutation_scale=style.arrow_scale,
             color="red",
-            facecolor="red",
             shrinkA=0,
             shrinkB=0,
         ),
