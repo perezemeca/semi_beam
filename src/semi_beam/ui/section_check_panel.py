@@ -21,7 +21,7 @@ from matplotlib.backend_bases import MouseButton
 from matplotlib.patches import FancyArrowPatch
 
 from semi_beam.sections.i_section import CompositeSection, ISection, IN_TO_MM, SectionRect
-from semi_beam.sections.flex_check import compute_flex_row
+from semi_beam.sections.flex_check import M_ZERO_TOL_KGCM, compute_flex_row
 from semi_beam.services.memoria_calculo_docx import (
     MemoriaHeader,
     MemoriaSeccion,
@@ -68,6 +68,7 @@ VIGA_LEFT_FACE_INTERIOR_MM = -389.0
 VIGA_LEFT_FACE_EXTERIOR_MM = -516.0
 VIGA_RIGHT_FACE_INTERIOR_MM = 389.0
 VIGA_RIGHT_FACE_EXTERIOR_MM = 516.0
+FLEX_NO_DEMAND_TEXT = "Sin demanda a flexión"
 
 
 def _in_to_mm(v_in: float) -> float:
@@ -128,6 +129,10 @@ def _fmt_int(v: float) -> str:
 def _fmt_in_mm(text_in: str) -> str:
     v_in = _parse_frac_in(text_in)
     return f"{text_in} - {_fmt2(_in_to_mm(v_in))} mm"
+
+
+def _is_no_flex_demand(M_kgcm: Optional[float]) -> bool:
+    return M_kgcm is not None and abs(float(M_kgcm)) <= M_ZERO_TOL_KGCM
 
 
 def _configure_combo_for_contents(cmb: QComboBox) -> None:
@@ -680,6 +685,7 @@ class SectionCheckPanel(QWidget):
     ) -> list[dict[str, Any]]:
         if M_kgcm is None:
             return []
+        no_flex_demand = _is_no_flex_demand(M_kgcm)
 
         props = sec.props_mm()
         ybar_global_mm = float(props.get("ybar_global_mm", props.get("ybar_mm", 0.0)))
@@ -715,9 +721,9 @@ class SectionCheckPanel(QWidget):
             y_sup = float(item["y_sup_mm"])
             c_mm = max(abs(y_inf - ybar_global_mm), abs(y_sup - ybar_global_mm))
             c_cm = c_mm / 10.0
-            sigma_calc = abs(float(M_kgcm)) * c_cm / max(ix_total_cm4, 1e-12)
+            sigma_calc = 0.0 if no_flex_demand else abs(float(M_kgcm)) * c_cm / max(ix_total_cm4, 1e-12)
             sigma_adm = self._material_sigma_by_id(str(item["material"]))
-            fs = None if sigma_adm is None else float(sigma_adm) / max(sigma_calc, 1e-12)
+            fs = math.inf if no_flex_demand else (None if sigma_adm is None else float(sigma_adm) / max(sigma_calc, 1e-12))
             checks.append(
                 {
                     "component": item["component"],
@@ -728,7 +734,8 @@ class SectionCheckPanel(QWidget):
                     "sigma_calc_kgcm2": sigma_calc,
                     "sigma_adm_kgcm2": sigma_adm,
                     "fs": fs,
-                    "wreq_cm3": None if sigma_adm is None else abs(float(M_kgcm)) / max(float(sigma_adm), 1e-12),
+                    "wreq_cm3": 0.0 if no_flex_demand else (None if sigma_adm is None else abs(float(M_kgcm)) / max(float(sigma_adm), 1e-12)),
+                    "no_flex_demand": no_flex_demand,
                 }
             )
 
@@ -739,7 +746,7 @@ class SectionCheckPanel(QWidget):
         return sorted(checks, key=_sort_key)
 
     def _governing_component_check(self, checks: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
-        valid = [row for row in checks if row.get("fs") is not None]
+        valid = [row for row in checks if row.get("fs") is not None and not row.get("no_flex_demand")]
         if not valid:
             return None
         return min(valid, key=lambda row: float(row["fs"]))
@@ -747,6 +754,8 @@ class SectionCheckPanel(QWidget):
     def _missing_material_components(self, checks: list[dict[str, Any]]) -> list[dict[str, str]]:
         missing: list[dict[str, str]] = []
         for row in checks:
+            if row.get("no_flex_demand"):
+                continue
             if row.get("sigma_adm_kgcm2") is not None:
                 continue
             missing.append(
@@ -770,6 +779,7 @@ class SectionCheckPanel(QWidget):
         props = sec.props_mm()
         chapon_context_error = self._chapon_context_missing()
         chapon_context_missing_fields = self._chapon_context_missing_fields() if chapon_context_error else []
+        no_flex_demand = _is_no_flex_demand(m_value)
 
         sigma_base_top_adm = self._mat_sigma(self._current_material_id(self.cmb_mat_top))
         sigma_base_bot_adm = self._mat_sigma(self._current_material_id(self.cmb_mat_bot))
@@ -779,14 +789,19 @@ class SectionCheckPanel(QWidget):
         sigma_bot_calc_adm = self._bottom_sigma_for_section(sec, sigma_base_bot_adm, sigma_chapon_adm)
 
         res = None
-        if m_value is not None and sigma_top_calc_adm is not None and sigma_bot_calc_adm is not None:
+        sigma_top_for_flex = sigma_top_calc_adm
+        sigma_bot_for_flex = sigma_bot_calc_adm
+        if no_flex_demand:
+            sigma_top_for_flex = 1.0 if sigma_top_for_flex is None else sigma_top_for_flex
+            sigma_bot_for_flex = 1.0 if sigma_bot_for_flex is None else sigma_bot_for_flex
+        if m_value is not None and sigma_top_for_flex is not None and sigma_bot_for_flex is not None:
             try:
                 res = compute_flex_row(
                     section=sec,
                     M_kgcm=m_value,
-                    sigma_adm_kgcm2=float(min(sigma_top_calc_adm, sigma_bot_calc_adm)),
-                    sigma_adm_top_kgcm2=float(sigma_top_calc_adm),
-                    sigma_adm_bot_kgcm2=float(sigma_bot_calc_adm),
+                    sigma_adm_kgcm2=float(min(sigma_top_for_flex, sigma_bot_for_flex)),
+                    sigma_adm_top_kgcm2=float(sigma_top_for_flex),
+                    sigma_adm_bot_kgcm2=float(sigma_bot_for_flex),
                     n_beams=self._calculation_n_beams(sec),
                     round_up_decimals=round_up_decimals,
                 )
@@ -808,6 +823,13 @@ class SectionCheckPanel(QWidget):
         wreq_bot = (abs(m_value) / max(float(sigma_bot_calc_adm), 1e-12)) if (m_value is not None and sigma_bot_calc_adm is not None) else None
         fs_top = (float(sigma_top_calc_adm) / max(sigma_top, 1e-12)) if (sigma_top_calc_adm is not None and sigma_top is not None) else None
         fs_bot = (float(sigma_bot_calc_adm) / max(sigma_bot, 1e-12)) if (sigma_bot_calc_adm is not None and sigma_bot is not None) else None
+        if no_flex_demand:
+            sigma_top = 0.0
+            sigma_bot = 0.0
+            wreq_top = 0.0
+            wreq_bot = 0.0
+            fs_top = math.inf
+            fs_bot = math.inf
 
         component_checks = self._component_flex_checks(sec, m_value)
         missing_materials = self._missing_material_components(component_checks)
@@ -816,7 +838,12 @@ class SectionCheckPanel(QWidget):
         fs_final = None
         sigma_final = None
         wreq_final = None
-        if chapon_context_error:
+        if no_flex_demand:
+            fs_final = math.inf
+            sigma_final = 0.0
+            wreq_final = 0.0
+            governing_component = None
+        elif chapon_context_error:
             res = None
             wreq_top = None
             wreq_bot = None
@@ -857,6 +884,7 @@ class SectionCheckPanel(QWidget):
         return {
             "sec": sec,
             "res": res,
+            "no_flex_demand": no_flex_demand,
             "chapon_context_error": chapon_context_error,
             "chapon_context_missing_fields": chapon_context_missing_fields,
             "sigma_top_calc_adm": sigma_top_calc_adm,
@@ -1329,19 +1357,20 @@ class SectionCheckPanel(QWidget):
                     m_value=M,
                     round_up_decimals=2,
                 )
+                no_flex_demand = bool(row_result["no_flex_demand"])
 
-                if row_result["chapon_context_error"]:
+                if row_result["chapon_context_error"] and not no_flex_demand:
                     self._clear_out_cells(r)
                     self._set_out_cell(r, self.COL_FS, "ERR CHAPÓN")
                     self._set_row_color(r, ok=False)
                     continue
 
-                if row_result["missing_materials"]:
+                if row_result["missing_materials"] and not no_flex_demand:
                     self._clear_out_cells(r)
                     self._set_out_cell(r, self.COL_FS, "ERR MAT")
                     self._set_row_color(r, ok=False)
                     continue
-                if row_result["sigma_top_calc_adm"] is None or row_result["sigma_bot_calc_adm"] is None:
+                if (row_result["sigma_top_calc_adm"] is None or row_result["sigma_bot_calc_adm"] is None) and not no_flex_demand:
                     self._clear_out_cells(r)
                     self._set_out_cell(r, self.COL_FS, "ERR MAT")
                     self._set_row_color(r, ok=False)
@@ -1360,7 +1389,7 @@ class SectionCheckPanel(QWidget):
                 self._set_out_cell(r, self.COL_WCRIT, _fmt2(res.Wcrit_cm3))
                 self._set_out_cell(r, self.COL_WREQ, _fmt2(wreq_final))
                 self._set_out_cell(r, self.COL_SIGMAX, _fmt2(sigma_final))
-                self._set_out_cell(r, self.COL_FS, _fmt2(fs_final))
+                self._set_out_cell(r, self.COL_FS, FLEX_NO_DEMAND_TEXT if no_flex_demand else _fmt2(fs_final))
 
                 self._set_row_color(r, ok=(fs_final >= nmin))
 
@@ -1504,6 +1533,7 @@ class SectionCheckPanel(QWidget):
             fs_text = _get_text(self.tbl, r, self.COL_FS)
             fs_value = _try_float(fs_text)
             sec = row_result["sec"]
+            no_flex_demand = bool(row_result["no_flex_demand"])
             chapon_context_error = row_result["chapon_context_error"]
             chapon_context_missing_fields = row_result["chapon_context_missing_fields"]
             V_value = None
@@ -1523,7 +1553,10 @@ class SectionCheckPanel(QWidget):
             wreq_bot = row_result["wreq_bot"]
             fs_top = row_result["fs_top"]
             fs_bot = row_result["fs_bot"]
-            if chapon_context_error:
+            if no_flex_demand:
+                fs_value = math.inf
+                fs_text = FLEX_NO_DEMAND_TEXT
+            elif chapon_context_error:
                 fs_value = None
                 fs_text = "ERR CHAPÓN"
             elif missing_materials:

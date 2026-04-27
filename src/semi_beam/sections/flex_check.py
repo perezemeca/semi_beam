@@ -7,6 +7,9 @@ import math
 from semi_beam.sections.i_section import ISection
 
 
+M_ZERO_TOL_KGCM = 1e-9
+
+
 @dataclass
 class FlexRowResult:
     # geom / propiedades (para mostrar)
@@ -92,6 +95,23 @@ def compute_flex_row(
     Wcrit_cm3 = I_cm4 / max(cmax_cm, 1e-12)
 
     M = float(M_kgcm)
+
+    if abs(M) <= M_ZERO_TOL_KGCM:
+        return FlexRowResult(
+            Jx_cm4=_round_up(I_cm4, round_up_decimals),
+            ybar_cm=_round_up(ybar_cm, round_up_decimals),
+            cmax_cm=_round_up(cmax_cm, round_up_decimals),
+            Wcrit_cm3=_round_up(Wcrit_cm3, round_up_decimals),
+            Wreq_cm3=0.0,
+            sigma_max_kgcm2=0.0,
+            FS=math.inf,
+
+            sigma_top_kgcm2=0.0,
+            sigma_bot_kgcm2=0.0,
+            FS_top=math.inf,
+            FS_bot=math.inf,
+            govern_side="",
+        )
 
     # tensión máx global (usando cmax)
     sigma_max = abs(M) / max(Wcrit_cm3, 1e-12)

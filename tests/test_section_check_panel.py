@@ -4,7 +4,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication
 
-from semi_beam.ui.section_check_panel import SectionCheckPanel
+from semi_beam.ui.section_check_panel import FLEX_NO_DEMAND_TEXT, SectionCheckPanel
 
 
 def _app():
@@ -23,6 +23,24 @@ def _load_valid_row(panel: SectionCheckPanel, *, row: int = 0, x_mm: str = "1000
     panel.tbl.item(row, panel.COL_X).setText(x_mm)
     panel.tbl.item(row, panel.COL_HWEB).setText(h_web_mm)
     panel.tbl.item(row, panel.COL_M).setText(moment)
+
+
+def test_section_panel_zero_moment_shows_no_flex_demand_without_chapon_error():
+    _app()
+    panel = SectionCheckPanel()
+    panel.chk_chapon.setChecked(True)
+    _load_valid_row(panel, moment="0")
+
+    panel._recompute_all()
+
+    fs_text = _cell(panel, 0, panel.COL_FS)
+    assert fs_text == FLEX_NO_DEMAND_TEXT
+    assert _cell(panel, 0, panel.COL_WREQ) == "0"
+    assert _cell(panel, 0, panel.COL_SIGMAX) == "0"
+    assert "ERR" not in fs_text
+    assert "inf" not in fs_text.lower()
+    assert "nan" not in fs_text.lower()
+    assert not fs_text.replace(".", "", 1).isdigit()
 
 
 def test_section_panel_composite_payload_includes_table_values():

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
+import math
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from xml.sax.saxutils import escape as _xml_escape
@@ -38,6 +39,7 @@ DOCX_USABLE_WIDTH_MM = DOCX_A4_WIDTH_MM - (2.0 * DOCX_MARGIN_MM)
 DOCX_CARD_COLUMNS = 2
 DOCX_CARD_CELL_WIDTH_MM = DOCX_USABLE_WIDTH_MM / DOCX_CARD_COLUMNS
 DOCX_CARD_IMAGE_WIDTH_MM = 62.0
+FLEX_NO_DEMAND_TEXT = "Sin demanda a flexión"
 
 
 @dataclass
@@ -95,6 +97,8 @@ def _fmt_num(value: Any, decimals: int = 2) -> str:
         number = float(value)
     except Exception:
         return normalize_spanish_text(str(value))
+    if not math.isfinite(number):
+        return "-"
     text = f"{number:.{int(decimals)}f}"
     if "." in text:
         text = text.rstrip("0").rstrip(".")
@@ -111,6 +115,18 @@ def _safe_float(value: Any) -> Optional[float]:
 
 def _clean_text(value: Any) -> str:
     return normalize_spanish_text(str(value if value is not None else ""))
+
+
+def _is_no_flex_demand_text(value: Any) -> bool:
+    return "sin demanda" in _clean_text(value).lower()
+
+
+def _is_no_flex_demand_card(card: Dict[str, Any]) -> bool:
+    if bool(card.get("no_flex_demand")):
+        return True
+    if _is_no_flex_demand_text(card.get("fs_text")):
+        return True
+    return _is_no_flex_demand_text((card.get("table_values") or {}).get("FS"))
 
 
 def _append_omml_equation(paragraph, text: str) -> None:
@@ -421,6 +437,7 @@ def _add_component_check_table(doc, checks: Sequence[Dict[str, Any]], fs_require
         _set_cell_text(cell, header, bold=True, font_size=7.2, align=WD_ALIGN_PARAGRAPH.CENTER, color="FFFFFF")
 
     for row_idx, check in enumerate(checks, start=1):
+        no_flex_demand = bool(check.get("no_flex_demand")) or _is_no_flex_demand_text(check.get("fs"))
         fs = _safe_float(check.get("fs"))
         ok = fs is not None and fs >= float(fs_required)
         material_missing = check.get("sigma_adm_kgcm2") is None
@@ -432,8 +449,8 @@ def _add_component_check_table(doc, checks: Sequence[Dict[str, Any]], fs_require
             _fmt_num(check.get("cmax_cm"), 3),
             _fmt_num(check.get("sigma_calc_kgcm2"), 2),
             "-" if check.get("sigma_adm_kgcm2") is None else _fmt_num(check.get("sigma_adm_kgcm2"), 2),
-            "-" if fs is None else _fmt_num(fs, 3),
-            "MATERIAL FALTANTE" if material_missing else ("CUMPLE" if ok else "NO CUMPLE"),
+            FLEX_NO_DEMAND_TEXT if no_flex_demand else ("-" if fs is None else _fmt_num(fs, 3)),
+            FLEX_NO_DEMAND_TEXT if no_flex_demand else ("MATERIAL FALTANTE" if material_missing else ("CUMPLE" if ok else "NO CUMPLE")),
         ]
         for col_idx, value in enumerate(row_values):
             cell = table.rows[row_idx].cells[col_idx]
@@ -492,11 +509,12 @@ def _add_row_memory(doc, card: Dict[str, Any], fs_required: float) -> None:
             ]
         )
     _add_kv_table(doc, kv_rows)
+    no_flex_demand = _is_no_flex_demand_card(card)
     table_values = dict(card.get("table_values") or {})
     if table_values:
         _add_paragraph(doc, "Resultado mostrado en tabla", bold=True, font_size=9.3, color="334155", spacing_after_pt=3)
         table_summary = (
-            f"FS = {table_values.get('FS') or '-'} | "
+            f"FS = {FLEX_NO_DEMAND_TEXT if no_flex_demand else (table_values.get('FS') or '-')} | "
             f"Jx = {table_values.get('Jx_cm4') or '-'} cm^4 | "
             f"y_bar = {table_values.get('ybar_cm') or '-'} cm | "
             f"cmax = {table_values.get('cmax_cm') or '-'} cm | "
@@ -541,10 +559,12 @@ def _add_row_memory(doc, card: Dict[str, Any], fs_required: float) -> None:
 
     if not card.get("include_chapon"):
         optional_status.append("Chapón: no activado.")
-    elif card.get("chapon_context_error"):
+    elif card.get("chapon_context_error") and not no_flex_demand:
         optional_status.append("Chapón: activo, pero no verificable por falta de contexto longitudinal.")
         missing_fields = [str(field) for field in list(card.get("chapon_context_missing_fields") or []) if str(field).strip()]
         optional_status.append(f"Campos faltantes del chapón: {', '.join(missing_fields) if missing_fields else 'No informado'}.")
+    elif card.get("chapon_context_error"):
+        optional_status.append("Chapón: activo; no se evalúa contexto longitudinal porque no hay demanda de flexión.")
     elif card.get("chapon_included"):
         optional_status.append(
             "Chapón: incluido en esta estación. "
@@ -563,7 +583,7 @@ def _add_row_memory(doc, card: Dict[str, Any], fs_required: float) -> None:
     material_error = bool(card.get("material_error"))
     chapon_context_error = bool(card.get("chapon_context_error"))
     fs_text = str(card.get("fs_text") or "").strip()
-    if material_error or chapon_context_error:
+    if (material_error or chapon_context_error) and not no_flex_demand:
         if material_error:
             _add_paragraph(
                 doc,
@@ -649,16 +669,19 @@ def _add_row_memory(doc, card: Dict[str, Any], fs_required: float) -> None:
         elif result_wreq is None:
             wreq_values = [v for v in (_safe_float(card.get("wreq_top_cm3")), _safe_float(card.get("wreq_bot_cm3"))) if v is not None]
             result_wreq = max(wreq_values) if wreq_values else 0.0
+        if no_flex_demand:
+            result_fs = math.inf
+            result_wreq = 0.0
         for eq in [
             f"sigma_sup = M * c_sup / I_x,total = {_fmt_num(card.get('sigma_top_kgcm2'), 4)} kg/cm^2",
             f"sigma_inf = M * c_inf / I_x,total = {_fmt_num(card.get('sigma_bot_kgcm2'), 4)} kg/cm^2",
             "sigma_i = M * c_i / I_x,total para cada componente",
             f"W_req = {_fmt_num(result_wreq, 4)} cm^3",
-            f"FS = {_fmt_num(result_fs, 4)}",
+            f"FS = {FLEX_NO_DEMAND_TEXT if no_flex_demand else _fmt_num(result_fs, 4)}",
         ]:
             _add_equation_paragraph(doc, eq)
         _add_component_check_table(doc, component_checks, fs_required)
-        compliance = float(result_fs or 0.0) >= float(fs_required)
+        compliance = True if no_flex_demand else float(result_fs or 0.0) >= float(fs_required)
         gov_text = ""
         if governing_component:
             gov_text = (

@@ -1,4 +1,5 @@
 import base64
+import math
 import os
 import tempfile
 import zipfile
@@ -27,6 +28,16 @@ def _write_png(path: str) -> None:
 def _document_xml(path) -> str:
     with zipfile.ZipFile(path) as zf:
         return zf.read("word/document.xml").decode("utf-8")
+
+
+def _document_text(path) -> str:
+    doc = Document(path)
+    texts = [p.text for p in doc.paragraphs if p.text]
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                texts.extend(p.text for p in cell.paragraphs if p.text)
+    return "\n".join(texts)
 
 
 def _export_with_verification(tmp_path, verification: dict) -> str:
@@ -199,6 +210,70 @@ def test_docx_renders_table_values(tmp_path):
     assert "987.65" in xml
     assert "432.10" in xml
     assert "1500" in xml
+
+
+def test_docx_renders_no_flex_demand_without_inf_or_chapon_error(tmp_path):
+    no_demand_text = "Sin demanda a flexi\u00f3n"
+    out = tmp_path / "memoria.docx"
+    export_memoria_docx(
+        out,
+        verification={
+            "fs_required": 1.5,
+            "n_beams": 1,
+            "cards": [
+                {
+                    "sec": "1",
+                    "x_mm": "1000",
+                    "fs_text": no_demand_text,
+                    "ok": True,
+                    "include_chapon": True,
+                    "chapon_context_error": True,
+                    "chapon_context_missing_fields": ["largo_viga_mm", "posicion_perno_mm"],
+                    "moment_kgcm": 0.0,
+                    "table_values": {
+                        "FS": no_demand_text,
+                        "Jx_cm4": "12345.67",
+                        "ybar_cm": "12.34",
+                        "cmax_cm": "56.78",
+                        "Wcrit_cm3": "987.65",
+                        "Wreq_cm3": "0",
+                        "sigma_max_kgcm2": "0",
+                    },
+                    "wreq_top_cm3": 0.0,
+                    "wreq_bot_cm3": 0.0,
+                    "sigma_top_kgcm2": 0.0,
+                    "sigma_bot_kgcm2": 0.0,
+                    "fs_top": math.inf,
+                    "fs_bot": math.inf,
+                    "component_checks": [
+                        {
+                            "component": "Viga principal - ala superior",
+                            "material": "SAE1010",
+                            "y_inf_cm": 0.0,
+                            "y_sup_cm": 1.0,
+                            "cmax_cm": 1.0,
+                            "sigma_calc_kgcm2": 0.0,
+                            "sigma_adm_kgcm2": 1400.0,
+                            "fs": math.inf,
+                            "wreq_cm3": 0.0,
+                            "no_flex_demand": True,
+                        },
+                    ],
+                }
+            ],
+        },
+    )
+
+    xml = _document_xml(out)
+    text = _document_text(out)
+
+    assert no_demand_text in text
+    assert "ERR CHAP" not in text
+    assert "FS = inf" not in xml
+    assert "&gt;inf&lt;" not in xml
+    assert "FS = nan" not in xml
+    assert "&gt;nan&lt;" not in xml.lower()
+    assert "100000000" not in xml
 
 
 def test_docx_renders_optional_component_status(tmp_path):
