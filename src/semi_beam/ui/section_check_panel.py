@@ -135,6 +135,44 @@ def _is_no_flex_demand(M_kgcm: Optional[float]) -> bool:
     return M_kgcm is not None and abs(float(M_kgcm)) <= M_ZERO_TOL_KGCM
 
 
+class DoubleWebGeometryError(ValueError):
+    pass
+
+
+def build_web_rects(
+    *,
+    b_f_mm: float,
+    t_web_mm: float,
+    h_web_mm: float,
+    y0_mm: float,
+    double_web_enabled: bool,
+    double_web_inner_face_offset_mm: Optional[float],
+    x_center_mm: float = 0.0,
+    label_prefix: str = "alma",
+) -> list[SectionRect]:
+    b_f = float(b_f_mm)
+    t = float(t_web_mm)
+    h = float(h_web_mm)
+    y0 = float(y0_mm)
+    xc = float(x_center_mm)
+
+    if not double_web_enabled:
+        return [SectionRect(xc - t / 2.0, y0, t, h, label_prefix)]
+
+    if double_web_inner_face_offset_mm is None:
+        raise DoubleWebGeometryError("Falta distancia de doble alma.")
+    d = float(double_web_inner_face_offset_mm)
+    if d < 0.0:
+        raise DoubleWebGeometryError("La distancia de doble alma no puede ser negativa.")
+    if d + t > b_f / 2.0:
+        raise DoubleWebGeometryError("La doble alma excede el ancho de la planchuela.")
+
+    return [
+        SectionRect(xc - d - t, y0, t, h, f"{label_prefix}_izq"),
+        SectionRect(xc + d, y0, t, h, f"{label_prefix}_der"),
+    ]
+
+
 def _configure_combo_for_contents(cmb: QComboBox) -> None:
     cmb.setSizeAdjustPolicy(QComboBox.AdjustToContents)
     cmb.setMinimumContentsLength(0)
@@ -161,15 +199,17 @@ class SectionCheckPanel(QWidget):
     COL_X = 1
     COL_HWEB = 2
     COL_TWEB = 3
-    COL_FS = 4
-    COL_M = 5
+    COL_DOUBLE_WEB = 4
+    COL_DOUBLE_WEB_OFFSET = 5
+    COL_FS = 6
+    COL_M = 7
 
-    COL_JX = 6
-    COL_YBAR = 7
-    COL_CMAX = 8
-    COL_WCRIT = 9
-    COL_WREQ = 10
-    COL_SIGMAX = 11
+    COL_JX = 8
+    COL_YBAR = 9
+    COL_CMAX = 10
+    COL_WCRIT = 11
+    COL_WREQ = 12
+    COL_SIGMAX = 13
 
     TFLANGE_OPTIONS = ["5/16", "3/8", "7/16", "1/2", "5/8", "3/4"]
     TWEB_OPTIONS = ["3/16", "1/4", "5/16", "3/8", "7/16", "1/2", "5/8"]
@@ -285,19 +325,22 @@ class SectionCheckPanel(QWidget):
         lay.addWidget(QLabel("Secciones: cargar x, h_viga y Espesor. M se autocompleta desde M(x)."))
 
         # Tabla
-        self.tbl = QTableWidget(8, 12)
+        self.tbl = QTableWidget(8, 14)
         self.tbl.setHorizontalHeaderLabels([
-            "Sección", "x [mm]", "h_viga [mm]", "Espesor", "FS", "M [kg·cm]",
+            "Sección", "x [mm]", "h_viga [mm]", "Espesor", "Doble alma", "d alma [mm]", "FS", "M [kg·cm]",
             "Jx [cm^4]", "ȳ [cm]", "c_max [cm]", "Wcrit [cm^3]", "Wreq [cm^3]", "σmax [kg/cm²]"
         ])
         self.tbl.horizontalHeader().setStretchLastSection(True)
         apply_table_readability_style(self.tbl)
 
         self._tweb_widgets: List[QComboBox] = []
+        self._double_web_widgets: List[QCheckBox] = []
         for r in range(self.tbl.rowCount()):
             _set_item(self.tbl, r, self.COL_SEC, str(r + 1))
             _set_item(self.tbl, r, self.COL_X, "")
             _set_item(self.tbl, r, self.COL_HWEB, "")
+            _set_item(self.tbl, r, self.COL_DOUBLE_WEB, "")
+            _set_item(self.tbl, r, self.COL_DOUBLE_WEB_OFFSET, "")
             _set_item(self.tbl, r, self.COL_FS, "")
             _set_item(self.tbl, r, self.COL_M, "")
             for c in [self.COL_JX, self.COL_YBAR, self.COL_CMAX, self.COL_WCRIT, self.COL_WREQ, self.COL_SIGMAX]:
@@ -306,6 +349,8 @@ class SectionCheckPanel(QWidget):
             _set_item_editable(self.tbl, r, self.COL_SEC, False)
             _set_item_editable(self.tbl, r, self.COL_X, True)
             _set_item_editable(self.tbl, r, self.COL_HWEB, True)
+            _set_item_editable(self.tbl, r, self.COL_DOUBLE_WEB, False)
+            _set_item_editable(self.tbl, r, self.COL_DOUBLE_WEB_OFFSET, False)
             _set_item_editable(self.tbl, r, self.COL_FS, False)
             _set_item_editable(self.tbl, r, self.COL_M, False)
             for c in [self.COL_JX, self.COL_YBAR, self.COL_CMAX, self.COL_WCRIT, self.COL_WREQ, self.COL_SIGMAX]:
@@ -321,9 +366,16 @@ class SectionCheckPanel(QWidget):
             self.tbl.setCellWidget(r, self.COL_TWEB, cmb)
             self._tweb_widgets.append(cmb)
 
+            chk_double_web = QCheckBox()
+            chk_double_web.toggled.connect(lambda _checked, rr=r: self._on_double_web_row_changed(rr))
+            self.tbl.setCellWidget(r, self.COL_DOUBLE_WEB, chk_double_web)
+            self._double_web_widgets.append(chk_double_web)
+            self._sync_double_web_row_controls(r)
+
         # Delegates numéricos
         self.tbl.setItemDelegateForColumn(self.COL_X, NullableFloatDelegate(self, decimals=2, minv=-1e12, maxv=1e12))
         self.tbl.setItemDelegateForColumn(self.COL_HWEB, SpinBoxDelegate(self, minv=0.0, maxv=5000.0, decimals=1, step=10.0))
+        self.tbl.setItemDelegateForColumn(self.COL_DOUBLE_WEB_OFFSET, NullableFloatDelegate(self, decimals=2, minv=0.0, maxv=1e12))
 
         lay.addWidget(self.tbl)
 
@@ -435,6 +487,27 @@ class SectionCheckPanel(QWidget):
         if 0 <= row < len(self._tweb_widgets):
             return self._current_thickness_in(self._tweb_widgets[row])
         return _get_text(self.tbl, row, self.COL_TWEB)
+
+    def _row_double_web_enabled(self, row: int) -> bool:
+        if 0 <= row < len(self._double_web_widgets):
+            return bool(self._double_web_widgets[row].isChecked())
+        return False
+
+    def _row_double_web_offset_mm(self, row: int) -> Optional[float]:
+        if not self._row_double_web_enabled(row):
+            return None
+        return _try_float(_get_text(self.tbl, row, self.COL_DOUBLE_WEB_OFFSET))
+
+    def _sync_double_web_row_controls(self, row: int) -> None:
+        enabled = self._row_double_web_enabled(row)
+        _set_item_editable(self.tbl, row, self.COL_DOUBLE_WEB_OFFSET, enabled)
+
+    def _on_double_web_row_changed(self, row: int) -> None:
+        self._sync_double_web_row_controls(row)
+        if row == self.tbl.currentRow():
+            self._repaint_preview_from_selection()
+        self._schedule_recompute()
+        self._emit_inertia_inputs_changed()
 
     def _populate_material_combos(self):
         for cmb in (self.cmb_mat_top, self.cmb_mat_bot, self.cmb_mat_web, self.cmb_mat_piso):
@@ -665,7 +738,7 @@ class SectionCheckPanel(QWidget):
             return "Viga principal - ala superior", self._current_material_id(self.cmb_mat_top)
         if label.endswith("ala_inf"):
             return "Viga principal - ala inferior", self._current_material_id(self.cmb_mat_bot)
-        if label.endswith("alma"):
+        if label.endswith("alma") or "_alma" in label:
             return "Viga principal - alma", self._current_material_id(self.cmb_mat_web)
         return "Viga principal", self._current_material_id(self.cmb_mat_web)
 
@@ -774,8 +847,17 @@ class SectionCheckPanel(QWidget):
         x_value: Optional[float],
         m_value: Optional[float],
         round_up_decimals: int,
+        row_index: Optional[int] = None,
     ) -> dict[str, Any]:
-        sec = self._make_section(hweb, tweb_in, station_mm=x_value)
+        double_web_enabled = self._row_double_web_enabled(row_index if row_index is not None else -1)
+        double_web_offset = self._row_double_web_offset_mm(row_index if row_index is not None else -1)
+        sec = self._make_section(
+            hweb,
+            tweb_in,
+            station_mm=x_value,
+            double_web_enabled=double_web_enabled,
+            double_web_inner_face_offset_mm=double_web_offset,
+        )
         props = sec.props_mm()
         chapon_context_error = self._chapon_context_missing()
         chapon_context_missing_fields = self._chapon_context_missing_fields() if chapon_context_error else []
@@ -887,6 +969,9 @@ class SectionCheckPanel(QWidget):
             "no_flex_demand": no_flex_demand,
             "chapon_context_error": chapon_context_error,
             "chapon_context_missing_fields": chapon_context_missing_fields,
+            "double_web_enabled": double_web_enabled,
+            "double_web_inner_face_offset_mm": double_web_offset,
+            "double_web_error": "",
             "sigma_top_calc_adm": sigma_top_calc_adm,
             "sigma_bot_calc_adm": sigma_bot_calc_adm,
             "sigma_base_top_adm": sigma_base_top_adm,
@@ -951,17 +1036,43 @@ class SectionCheckPanel(QWidget):
             t_web_mm=_in_to_mm(float(t_web_in)),
         )
 
-    def _double_i_rects(self, sec: ISection) -> list[SectionRect]:
+    def _double_i_rects(
+        self,
+        sec: ISection,
+        *,
+        double_web_enabled: bool = False,
+        double_web_inner_face_offset_mm: Optional[float] = None,
+    ) -> list[SectionRect]:
         left_x0 = VIGA_LEFT_FACE_EXTERIOR_MM
         right_x0 = VIGA_RIGHT_FACE_INTERIOR_MM
         left_web_center = 0.5 * (VIGA_LEFT_FACE_EXTERIOR_MM + VIGA_LEFT_FACE_INTERIOR_MM)
         right_web_center = 0.5 * (VIGA_RIGHT_FACE_INTERIOR_MM + VIGA_RIGHT_FACE_EXTERIOR_MM)
+        left_webs = build_web_rects(
+            b_f_mm=sec.b_f_mm,
+            t_web_mm=sec.t_web_mm,
+            h_web_mm=sec.h_web_mm,
+            y0_mm=sec.t_bot_mm,
+            double_web_enabled=double_web_enabled,
+            double_web_inner_face_offset_mm=double_web_inner_face_offset_mm,
+            x_center_mm=left_web_center,
+            label_prefix="viga_izq_alma",
+        )
+        right_webs = build_web_rects(
+            b_f_mm=sec.b_f_mm,
+            t_web_mm=sec.t_web_mm,
+            h_web_mm=sec.h_web_mm,
+            y0_mm=sec.t_bot_mm,
+            double_web_enabled=double_web_enabled,
+            double_web_inner_face_offset_mm=double_web_inner_face_offset_mm,
+            x_center_mm=right_web_center,
+            label_prefix="viga_der_alma",
+        )
         return [
             SectionRect(left_x0, 0.0, sec.b_f_mm, sec.t_bot_mm, "viga_izq_ala_inf"),
-            SectionRect(left_web_center - sec.t_web_mm / 2.0, sec.t_bot_mm, sec.t_web_mm, sec.h_web_mm, "viga_izq_alma"),
+            *left_webs,
             SectionRect(left_x0, sec.t_bot_mm + sec.h_web_mm, sec.b_f_mm, sec.t_top_mm, "viga_izq_ala_sup"),
             SectionRect(right_x0, 0.0, sec.b_f_mm, sec.t_bot_mm, "viga_der_ala_inf"),
-            SectionRect(right_web_center - sec.t_web_mm / 2.0, sec.t_bot_mm, sec.t_web_mm, sec.h_web_mm, "viga_der_alma"),
+            *right_webs,
             SectionRect(right_x0, sec.t_bot_mm + sec.h_web_mm, sec.b_f_mm, sec.t_top_mm, "viga_der_ala_sup"),
         ]
 
@@ -1011,15 +1122,21 @@ class SectionCheckPanel(QWidget):
         t_web_in: float,
         *,
         station_mm: Optional[float] = None,
+        double_web_enabled: bool = False,
+        double_web_inner_face_offset_mm: Optional[float] = None,
     ) -> ISection | CompositeSection:
         base = self._make_base_section(h_web_mm, t_web_in)
         include_bastidor = self._include_bastidor_lateral_in_geometry()
         include_piso = self._include_piso_in_geometry()
         include_chapon = self._include_chapon_in_geometry(station_mm)
-        if not include_bastidor and not include_piso and not include_chapon:
+        if not include_bastidor and not include_piso and not include_chapon and not double_web_enabled:
             return base
 
-        rects = self._double_i_rects(base)
+        rects = self._double_i_rects(
+            base,
+            double_web_enabled=double_web_enabled,
+            double_web_inner_face_offset_mm=double_web_inner_face_offset_mm,
+        )
         chapon_end = self._chapon_end_mm()
         if include_chapon:
             rects.extend(self._chapon_rects(0.0))
@@ -1233,8 +1350,20 @@ class SectionCheckPanel(QWidget):
         r = self.tbl.currentRow()
         if r >= 0:
             station_mm = _try_float(_get_text(self.tbl, r, self.COL_X))
-        sec = self._make_section(h_web_override_mm, t_web_in, station_mm=station_mm)
-        self._draw_section_preview_on(self.ax, sec)
+        try:
+            sec = self._make_section(
+                h_web_override_mm,
+                t_web_in,
+                station_mm=station_mm,
+                double_web_enabled=self._row_double_web_enabled(r),
+                double_web_inner_face_offset_mm=self._row_double_web_offset_mm(r),
+            )
+        except DoubleWebGeometryError:
+            self.ax.clear()
+            self.ax.text(0.5, 0.5, "ERR DOBLE ALMA", ha="center", va="center", transform=self.ax.transAxes)
+            self.ax.axis("off")
+        else:
+            self._draw_section_preview_on(self.ax, sec)
         self.canvas.draw_idle()
 
     def _repaint_preview_from_selection(self):
@@ -1260,9 +1389,9 @@ class SectionCheckPanel(QWidget):
         r, c = it.row(), it.column()
         if c == self.COL_X:
             self._auto_fill_M_for_row(r)
-        if c == self.COL_HWEB and r == self.tbl.currentRow():
+        if c in (self.COL_HWEB, self.COL_DOUBLE_WEB_OFFSET) and r == self.tbl.currentRow():
             self._repaint_preview_from_selection()
-        if c in (self.COL_X, self.COL_HWEB):
+        if c in (self.COL_X, self.COL_HWEB, self.COL_DOUBLE_WEB_OFFSET):
             self._emit_inertia_inputs_changed()
 
     def _auto_fill_M_for_row(self, r: int):
@@ -1292,6 +1421,8 @@ class SectionCheckPanel(QWidget):
         fg = QBrush(QColor(TABLE_TEXT_COLOR))
         result_brush = col_readonly if ok is None else (col_ok if ok else col_bad)
         editable_cols = {self.COL_X, self.COL_HWEB}
+        if self._row_double_web_enabled(r):
+            editable_cols.add(self.COL_DOUBLE_WEB_OFFSET)
         computed_cols = {
             self.COL_FS,
             self.COL_JX,
@@ -1321,6 +1452,9 @@ class SectionCheckPanel(QWidget):
             w = self.tbl.cellWidget(r, self.COL_TWEB)
             if w is not None:
                 w.setStyleSheet(combo_cell_style(TABLE_INPUT_BG))
+            chk = self.tbl.cellWidget(r, self.COL_DOUBLE_WEB)
+            if chk is not None:
+                chk.setStyleSheet(combo_cell_style(TABLE_INPUT_BG))
 
     def _set_out_cell(self, r: int, c: int, text: str):
         it = self.tbl.item(r, c)
@@ -1356,6 +1490,7 @@ class SectionCheckPanel(QWidget):
                     x_value=x_value,
                     m_value=M,
                     round_up_decimals=2,
+                    row_index=r,
                 )
                 no_flex_demand = bool(row_result["no_flex_demand"])
 
@@ -1393,6 +1528,10 @@ class SectionCheckPanel(QWidget):
 
                 self._set_row_color(r, ok=(fs_final >= nmin))
 
+            except DoubleWebGeometryError:
+                self._clear_out_cells(r)
+                self._set_out_cell(r, self.COL_FS, "ERR DOBLE ALMA")
+                self._set_row_color(r, ok=False)
             except Exception as e:
                 # ✅ una fila con error no mata toda la tabla
                 self._clear_out_cells(r)
@@ -1416,6 +1555,8 @@ class SectionCheckPanel(QWidget):
             for c in range(self.tbl.columnCount()):
                 if c == self.COL_TWEB:
                     row.append(self._tweb_widgets[r].currentText())
+                elif c == self.COL_DOUBLE_WEB:
+                    row.append("Sí" if self._row_double_web_enabled(r) else "No")
                 else:
                     row.append(_get_text(self.tbl, r, c))
             data.append(row)
@@ -1441,9 +1582,9 @@ class SectionCheckPanel(QWidget):
         fig.savefig(path, format="jpg", dpi=600)
         QMessageBox.information(self, "Exportación", "Tabla exportada a JPG (alta resolución).")
 
-    # ============================================================
+    # ------------------------------------------------------------
     # API pública (para Memoria de Cálculo)
-    # ============================================================
+    # ------------------------------------------------------------
     def export_table_jpg(self, path: str, *, dpi: int = 300) -> None:
         """Exporta la tabla completa (con colores) a JPG. No muestra diálogos."""
         try:
@@ -1460,6 +1601,8 @@ class SectionCheckPanel(QWidget):
                 for c in range(self.tbl.columnCount()):
                     if c == self.COL_TWEB:
                         row.append(self._tweb_widgets[r].currentText() if r < len(self._tweb_widgets) else _get_text(self.tbl, r, c))
+                    elif c == self.COL_DOUBLE_WEB:
+                        row.append("Sí" if self._row_double_web_enabled(r) else "No")
                     else:
                         row.append(_get_text(self.tbl, r, c))
                 data.append(row)
@@ -1497,6 +1640,8 @@ class SectionCheckPanel(QWidget):
             for c in range(self.tbl.columnCount()):
                 if c == self.COL_TWEB:
                     row.append(self._tweb_widgets[r].currentText() if r < len(self._tweb_widgets) else _get_text(self.tbl, r, c))
+                elif c == self.COL_DOUBLE_WEB:
+                    row.append("Sí" if self._row_double_web_enabled(r) else "No")
                 else:
                     row.append(_get_text(self.tbl, r, c))
             data.append(row)
@@ -1526,7 +1671,33 @@ class SectionCheckPanel(QWidget):
                     x_value=x_value,
                     m_value=M_value,
                     round_up_decimals=4,
+                    row_index=r,
                 )
+            except DoubleWebGeometryError as e:
+                cards.append(
+                    {
+                        "sec": _get_text(self.tbl, r, self.COL_SEC) or str(r + 1),
+                        "x_mm": _get_text(self.tbl, r, self.COL_X),
+                        "h_web_mm": float(hweb),
+                        "t_web_in": self._current_tweb_in(r),
+                        "table_values": {
+                            "FS": "ERR DOBLE ALMA",
+                            "Jx_cm4": "",
+                            "ybar_cm": "",
+                            "cmax_cm": "",
+                            "Wcrit_cm3": "",
+                            "Wreq_cm3": "",
+                            "sigma_max_kgcm2": "",
+                        },
+                        "fs_text": "ERR DOBLE ALMA",
+                        "ok": False,
+                        "double_web_enabled": self._row_double_web_enabled(r),
+                        "double_web_inner_face_offset_mm": self._row_double_web_offset_mm(r),
+                        "double_web_error": str(e),
+                        "moment_kgcm": M_value,
+                    }
+                )
+                continue
             except Exception:
                 continue
 
@@ -1600,6 +1771,9 @@ class SectionCheckPanel(QWidget):
                     "chapon_included": isinstance(sec, CompositeSection) and sec.includes_chapon,
                     "chapon_context_error": bool(chapon_context_error),
                     "chapon_context_missing_fields": chapon_context_missing_fields,
+                    "double_web_enabled": row_result["double_web_enabled"],
+                    "double_web_inner_face_offset_mm": row_result["double_web_inner_face_offset_mm"],
+                    "double_web_error": row_result["double_web_error"],
                     "material_chapon": CHAPON_MATERIAL_ID,
                     "espesor_chapon": self._current_chapon_thickness_mm(),
                     "ancho_chapon": CHAPON_ANCHO_MM,
@@ -1945,7 +2119,13 @@ class SectionCheckPanel(QWidget):
                 continue
             try:
                 tweb_in = _parse_frac_in(self._current_tweb_in(r))
-                sec = self._make_section(hweb, tweb_in, station_mm=x_row)
+                sec = self._make_section(
+                    hweb,
+                    tweb_in,
+                    station_mm=x_row,
+                    double_web_enabled=self._row_double_web_enabled(r),
+                    double_web_inner_face_offset_mm=self._row_double_web_offset_mm(r),
+                )
                 ix_mm4 = float(sec.props_mm()["Ix_mm4"]) * float(self._calculation_n_beams(sec))
             except Exception:
                 continue
@@ -1968,6 +2148,8 @@ class SectionCheckPanel(QWidget):
                     "x_mm": _get_text(self.tbl, r, self.COL_X),
                     "h_web_mm": _get_text(self.tbl, r, self.COL_HWEB),
                     "t_web_in": self._current_tweb_in(r),
+                    "double_web_enabled": self._row_double_web_enabled(r),
+                    "double_web_inner_face_offset_mm": self._row_double_web_offset_mm(r),
                 }
             )
         return {
@@ -2057,6 +2239,21 @@ class SectionCheckPanel(QWidget):
                     _set_item(self.tbl, r, self.COL_HWEB, str(row.get("h_web_mm", "")))
                     if r < len(self._tweb_widgets):
                         _set_combo_data(self._tweb_widgets[r], row.get("t_web_in"))
+                    if r < len(self._double_web_widgets):
+                        chk = self._double_web_widgets[r]
+                        chk.blockSignals(True)
+                        try:
+                            chk.setChecked(bool(row.get("double_web_enabled", False)))
+                        finally:
+                            chk.blockSignals(False)
+                    offset = row.get("double_web_inner_face_offset_mm")
+                    _set_item(
+                        self.tbl,
+                        r,
+                        self.COL_DOUBLE_WEB_OFFSET,
+                        "" if offset is None else str(offset),
+                    )
+                    self._sync_double_web_row_controls(r)
         finally:
             self.tbl.blockSignals(False)
             self.blockSignals(False)

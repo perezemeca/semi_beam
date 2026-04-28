@@ -248,6 +248,8 @@ def test_study_file_roundtrip_restores_ui_state(tmp_path):
     semi.section_panel.cmb_mat_piso.setCurrentIndex(semi.section_panel.cmb_mat_piso.findData("F24"))
     semi.section_panel.chk_chapon.setChecked(True)
     semi.section_panel.cmb_espesor_chapon.setCurrentIndex(semi.section_panel.cmb_espesor_chapon.findData(7.9375))
+    semi.section_panel._double_web_widgets[0].setChecked(True)
+    semi.section_panel.tbl.item(0, semi.section_panel.COL_DOUBLE_WEB_OFFSET).setText("20")
     semi.section_panel.tbl.item(0, semi.section_panel.COL_X).setText("1000")
     semi.section_panel.tbl.item(0, semi.section_panel.COL_HWEB).setText("450")
 
@@ -283,6 +285,8 @@ def test_study_file_roundtrip_restores_ui_state(tmp_path):
     assert restored_semi.section_panel.cmb_mat_piso.currentData() == "F24"
     assert restored_semi.section_panel.chk_chapon.isChecked() is True
     assert restored_semi.section_panel.cmb_espesor_chapon.currentData() == 7.9375
+    assert restored_semi.section_panel._row_double_web_enabled(0) is True
+    assert restored_semi.section_panel._row_double_web_offset_mm(0) == 20.0
     assert restored_semi.section_panel.tbl.item(0, restored_semi.section_panel.COL_X).text() == "1000"
     assert restored_semi.section_panel.tbl.item(0, restored_semi.section_panel.COL_HWEB).text() == "450"
     assert restored_reactions.mode.currentIndex() == 1
