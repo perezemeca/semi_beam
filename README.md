@@ -110,12 +110,22 @@ El calculo contempla materiales por componente y verificacion por componente. El
 - Tramo longitudinal considerado: desde `x = 0` hasta `posicion_perno_mm + 1000 mm`.
 - Requiere contexto longitudinal de largo de viga y posicion de perno para determinar si aplica en cada estacion.
 
+### Doble alma de viga
+
+- La opcion se activa por seccion/fila del verificador; no es una opcion global.
+- No depende del largo carrozable, perno rey ni chapon.
+- Reemplaza el alma central por dos almas simetricas respecto del centro geometrico de la planchuela.
+- El usuario define la distancia desde el centro geometrico de la planchuela hasta la cara interna de cada alma.
+- La luz libre entre almas es `2` veces esa distancia.
+- La configuracion queda incluida en el calculo, el preview, el guardado/carga `.sbeam` y la memoria DOCX.
+
 ## Estados no verificables
 
 El verificador distingue fallas resistentes numericas de secciones no verificables por falta de datos.
 
 - `ERR MAT`: falta material admisible para un componente activo incluido en la seccion resistente. La fila no se considera verificada hasta corregir la base de materiales o la asignacion de material.
 - `ERR CHAPON`: el chapon esta activo, pero falta contexto longitudinal para evaluar su inclusion. Se debe definir largo de viga y posicion de perno.
+- `ERR DOBLE ALMA`: la doble alma esta activa, pero la distancia ingresada no permite una geometria verificable dentro del ancho de la planchuela.
 
 Estos estados tambien se exportan a la memoria DOCX sin convertirlos en `FS = 0`.
 
@@ -140,7 +150,8 @@ Para el verificador de seccion incluye:
 - Componente gobernante.
 - Tabla por componente.
 - Imagen de la seccion compuesta.
-- Trazabilidad de `ERR MAT` y `ERR CHAPON` sin tratarlos como `FS = 0`.
+- Configuracion de alma simple o doble por seccion.
+- Trazabilidad de `ERR MAT`, `ERR CHAPON` y `ERR DOBLE ALMA` sin tratarlos como `FS = 0`.
 
 ## Tests
 

@@ -212,6 +212,103 @@ def test_docx_renders_table_values(tmp_path):
     assert "1500" in xml
 
 
+def test_docx_renders_simple_web_configuration(tmp_path):
+    out = tmp_path / "memoria.docx"
+    export_memoria_docx(
+        out,
+        verification={
+            "fs_required": 1.5,
+            "n_beams": 1,
+            "cards": [
+                {
+                    "sec": "1",
+                    "fs_text": "2.31",
+                    "ok": True,
+                    "web_configuration_label": "Simple",
+                    "double_web_enabled": False,
+                    "double_web_inner_face_offset_mm": None,
+                    "double_web_clear_gap_mm": None,
+                    "t_web_mm": 6.35,
+                    "t_web_in": "1/4",
+                }
+            ],
+        },
+    )
+
+    text = _document_text(out)
+
+    assert "Configuración de alma" in text
+    assert "Simple" in text
+
+
+def test_docx_renders_double_web_configuration(tmp_path):
+    out = tmp_path / "memoria.docx"
+    export_memoria_docx(
+        out,
+        verification={
+            "fs_required": 1.5,
+            "n_beams": 1,
+            "cards": [
+                {
+                    "sec": "1",
+                    "fs_text": "2.31",
+                    "ok": True,
+                    "web_configuration_label": "Doble",
+                    "double_web_enabled": True,
+                    "double_web_inner_face_offset_mm": 20.0,
+                    "double_web_clear_gap_mm": 40.0,
+                    "t_web_mm": 6.35,
+                    "t_web_in": "1/4",
+                }
+            ],
+        },
+    )
+
+    text = _document_text(out)
+
+    assert "Configuración de alma" in text
+    assert "Doble" in text
+    assert "Distancia centro" in text
+    assert "20" in text
+    assert "Luz libre" in text
+    assert "40" in text
+    assert "Espesor de cada alma" in text
+
+
+def test_docx_renders_double_web_error_without_zero_fs(tmp_path):
+    out = tmp_path / "memoria.docx"
+    export_memoria_docx(
+        out,
+        verification={
+            "fs_required": 1.5,
+            "n_beams": 1,
+            "cards": [
+                {
+                    "sec": "1",
+                    "fs_text": "ERR DOBLE ALMA",
+                    "ok": False,
+                    "web_configuration_label": "Doble",
+                    "double_web_enabled": True,
+                    "double_web_inner_face_offset_mm": 60.0,
+                    "double_web_clear_gap_mm": 120.0,
+                    "double_web_error": "La doble alma excede el ancho de la planchuela.",
+                    "t_web_mm": 6.35,
+                    "t_web_in": "1/4",
+                    "table_values": {"FS": "ERR DOBLE ALMA"},
+                }
+            ],
+        },
+    )
+
+    xml = _document_xml(out)
+    text = _document_text(out)
+
+    assert "ERR DOBLE ALMA" in text
+    assert "Sección no verificable" in text
+    assert "FS = 0.0000" not in xml
+    assert "FS = 0,0000" not in xml
+
+
 def test_docx_renders_no_flex_demand_without_inf_or_chapon_error(tmp_path):
     no_demand_text = "Sin demanda a flexi\u00f3n"
     out = tmp_path / "memoria.docx"

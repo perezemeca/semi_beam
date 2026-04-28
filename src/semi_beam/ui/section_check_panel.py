@@ -498,6 +498,16 @@ class SectionCheckPanel(QWidget):
             return None
         return _try_float(_get_text(self.tbl, row, self.COL_DOUBLE_WEB_OFFSET))
 
+    def _double_web_payload_for_row(self, row: int) -> dict[str, Any]:
+        enabled = self._row_double_web_enabled(row)
+        offset = self._row_double_web_offset_mm(row) if enabled else None
+        return {
+            "double_web_enabled": enabled,
+            "double_web_inner_face_offset_mm": offset,
+            "double_web_clear_gap_mm": None if offset is None else 2.0 * float(offset),
+            "web_configuration_label": "Doble" if enabled else "Simple",
+        }
+
     def _sync_double_web_row_controls(self, row: int) -> None:
         enabled = self._row_double_web_enabled(row)
         _set_item_editable(self.tbl, row, self.COL_DOUBLE_WEB_OFFSET, enabled)
@@ -1674,12 +1684,14 @@ class SectionCheckPanel(QWidget):
                     row_index=r,
                 )
             except DoubleWebGeometryError as e:
+                double_web_payload = self._double_web_payload_for_row(r)
                 cards.append(
                     {
                         "sec": _get_text(self.tbl, r, self.COL_SEC) or str(r + 1),
                         "x_mm": _get_text(self.tbl, r, self.COL_X),
                         "h_web_mm": float(hweb),
                         "t_web_in": self._current_tweb_in(r),
+                        "t_web_mm": _in_to_mm(float(tweb_in)),
                         "table_values": {
                             "FS": "ERR DOBLE ALMA",
                             "Jx_cm4": "",
@@ -1691,8 +1703,7 @@ class SectionCheckPanel(QWidget):
                         },
                         "fs_text": "ERR DOBLE ALMA",
                         "ok": False,
-                        "double_web_enabled": self._row_double_web_enabled(r),
-                        "double_web_inner_face_offset_mm": self._row_double_web_offset_mm(r),
+                        **double_web_payload,
                         "double_web_error": str(e),
                         "moment_kgcm": M_value,
                     }
@@ -1724,6 +1735,7 @@ class SectionCheckPanel(QWidget):
             wreq_bot = row_result["wreq_bot"]
             fs_top = row_result["fs_top"]
             fs_bot = row_result["fs_bot"]
+            double_web_payload = self._double_web_payload_for_row(r)
             if no_flex_demand:
                 fs_value = math.inf
                 fs_text = FLEX_NO_DEMAND_TEXT
@@ -1771,8 +1783,7 @@ class SectionCheckPanel(QWidget):
                     "chapon_included": isinstance(sec, CompositeSection) and sec.includes_chapon,
                     "chapon_context_error": bool(chapon_context_error),
                     "chapon_context_missing_fields": chapon_context_missing_fields,
-                    "double_web_enabled": row_result["double_web_enabled"],
-                    "double_web_inner_face_offset_mm": row_result["double_web_inner_face_offset_mm"],
+                    **double_web_payload,
                     "double_web_error": row_result["double_web_error"],
                     "material_chapon": CHAPON_MATERIAL_ID,
                     "espesor_chapon": self._current_chapon_thickness_mm(),

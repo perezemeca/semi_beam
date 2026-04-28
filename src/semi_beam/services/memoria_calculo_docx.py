@@ -129,6 +129,14 @@ def _is_no_flex_demand_card(card: Dict[str, Any]) -> bool:
     return _is_no_flex_demand_text((card.get("table_values") or {}).get("FS"))
 
 
+def _is_double_web_error_card(card: Dict[str, Any]) -> bool:
+    if str(card.get("double_web_error") or "").strip():
+        return True
+    if "ERR DOBLE ALMA" in _clean_text(card.get("fs_text")).upper():
+        return True
+    return "ERR DOBLE ALMA" in _clean_text((card.get("table_values") or {}).get("FS")).upper()
+
+
 def _append_omml_equation(paragraph, text: str) -> None:
     _ensure_docx_lib()
     expr = _xml_escape(normalize_spanish_text(text or "").strip()) or "0"
@@ -390,6 +398,7 @@ def _add_theory_section(doc) -> None:
         "Para n vigas iguales en paralelo se adopta I_x,total = n · I_x,1 viga.",
         "La demanda resistente se obtiene a partir del momento flector actuante en cada sección evaluada.",
         "Se verifican flexión, cortante y flecha con el menor factor de seguridad como condición gobernante.",
+        "La doble alma se modela como dos chapas de alma simétricas respecto del centro geométrico de la planchuela. La distancia informada corresponde a la separación desde dicho centro hasta la cara interna de cada alma.",
     ]:
         p = doc.add_paragraph(style=None)
         p.paragraph_format.space_before = Pt(0)
@@ -473,9 +482,18 @@ def _add_row_memory(doc, card: Dict[str, Any], fs_required: float) -> None:
         ("Espesor ala inferior", f"{_fmt_num(card.get('t_bot_mm'), 2)} mm ({_fmt_num(card.get('t_bot_in'), 4)} in)"),
         ("Espesor de alma", f"{_fmt_num(card.get('t_web_mm'), 2)} mm ({card.get('t_web_in', '-')})"),
         ("Altura libre del alma", f"{_fmt_num(card.get('h_web_mm'), 2)} mm"),
+        ("Configuración de alma", str(card.get("web_configuration_label", "Simple") or "Simple")),
         ("σ admisible superior", f"{_fmt_num(card.get('sigma_top_adm_kgcm2'), 2)} kg/cm²" if card.get("sigma_top_adm_kgcm2") is not None else "-"),
         ("σ admisible inferior", f"{_fmt_num(card.get('sigma_bot_adm_kgcm2'), 2)} kg/cm²" if card.get("sigma_bot_adm_kgcm2") is not None else "-"),
     ]
+    if bool(card.get("double_web_enabled")):
+        kv_rows.extend(
+            [
+                ("Distancia centro a cara interna", f"{_fmt_num(card.get('double_web_inner_face_offset_mm'), 2)} mm"),
+                ("Luz libre entre almas", f"{_fmt_num(card.get('double_web_clear_gap_mm'), 2)} mm"),
+                ("Espesor de cada alma", f"{_fmt_num(card.get('t_web_mm'), 2)} mm"),
+            ]
+        )
     if card.get("bastidor_lateral_included"):
         kv_rows.extend(
             [
@@ -582,8 +600,34 @@ def _add_row_memory(doc, card: Dict[str, Any], fs_required: float) -> None:
 
     material_error = bool(card.get("material_error"))
     chapon_context_error = bool(card.get("chapon_context_error"))
+    double_web_error = _is_double_web_error_card(card)
     fs_text = str(card.get("fs_text") or "").strip()
-    if (material_error or chapon_context_error) and not no_flex_demand:
+    if (double_web_error or material_error or chapon_context_error) and not no_flex_demand:
+        if double_web_error:
+            _add_paragraph(
+                doc,
+                "ERR DOBLE ALMA - Sección no verificable por configuración geométrica de alma",
+                bold=True,
+                font_size=9.3,
+                color="B00020",
+                spacing_after_pt=3,
+            )
+            _add_kv_table(
+                doc,
+                [
+                    ("Configuración de alma", str(card.get("web_configuration_label", "Doble") or "Doble")),
+                    ("Distancia centro a cara interna", f"{_fmt_num(card.get('double_web_inner_face_offset_mm'), 2)} mm"),
+                    ("Luz libre entre almas", f"{_fmt_num(card.get('double_web_clear_gap_mm'), 2)} mm"),
+                    ("Motivo", str(card.get("double_web_error") or "Geometría de doble alma inválida")),
+                ],
+            )
+            _add_paragraph(
+                doc,
+                "Debe corregirse la distancia de doble alma antes de validar la sección.",
+                font_size=8.9,
+                color="111827",
+                spacing_after_pt=4,
+            )
         if material_error:
             _add_paragraph(
                 doc,
