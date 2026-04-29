@@ -259,6 +259,40 @@ def test_section_panel_export_import_preserves_double_web_row_state():
     assert restored._row_double_web_offset_mm(0) == 20.0
 
 
+def test_section_panel_export_import_preserves_floor_width_without_structural_flag():
+    _app()
+    panel = SectionCheckPanel()
+    panel.chk_piso.setChecked(True)
+    panel.n_piso_width.setValue(1850.0)
+
+    state = panel.export_state()
+
+    assert state["include_piso"] is True
+    assert state["piso_width_mm"] == 1850.0
+    assert "piso_structural" not in state
+
+    restored = SectionCheckPanel()
+    restored.import_state({**state, "piso_structural": False})
+
+    assert restored.chk_piso.isChecked() is True
+    assert restored.n_piso_width.value() == 1850.0
+    assert "piso_structural" not in restored.export_state()
+
+
+def test_section_panel_import_uses_default_floor_width_when_missing():
+    _app()
+    panel = SectionCheckPanel()
+
+    panel.import_state({"include_piso": True, "piso_structural": False})
+
+    assert panel.chk_piso.isChecked() is True
+    assert panel.n_piso_width.value() == 2430.0
+    sec = panel._make_section(450.0, 0.25)
+    piso_rects = [rect for rect in sec.rects if rect.label == "piso"]
+    assert len(piso_rects) == 1
+    assert piso_rects[0].b_mm == 2430.0
+
+
 def test_section_panel_invalid_double_web_returns_error_state():
     _app()
     panel = SectionCheckPanel()
@@ -275,6 +309,23 @@ def test_section_panel_invalid_double_web_returns_error_state():
     assert cards[0]["fs_text"] == "ERR DOBLE ALMA"
     assert cards[0]["ok"] is False
     assert cards[0]["double_web_error"]
+
+
+def test_section_panel_valid_double_web_calculates_fs():
+    _app()
+    panel = SectionCheckPanel()
+    panel.set_moment_provider(lambda _x_mm: 125000.0)
+    panel._double_web_widgets[0].setChecked(True)
+    panel.tbl.item(0, panel.COL_DOUBLE_WEB_OFFSET).setText("20")
+    panel.tbl.item(0, panel.COL_X).setText("1000")
+    panel.tbl.item(0, panel.COL_HWEB).setText("450")
+
+    panel._recompute_all()
+
+    fs_text = _cell(panel, 0, panel.COL_FS)
+    assert fs_text
+    assert "ERR" not in fs_text
+    assert float(fs_text) > 0.0
 
 
 def test_section_panel_double_web_disabled_preserves_existing_results():

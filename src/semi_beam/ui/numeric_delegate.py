@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
-import re
 
-from PySide6.QtGui import QDoubleValidator, QValidator
+from PySide6.QtGui import QValidator
 from PySide6.QtWidgets import QLineEdit, QStyledItemDelegate, QDoubleSpinBox
+
+from semi_beam.ui.number_parsing import (
+    normalize_decimal_text,
+    normalize_line_edit_text,
+    parse_user_float,
+    try_parse_user_float,
+)
 
 
 TABLE_TEXT_COLOR = "#111111"
@@ -109,24 +115,20 @@ class NullableFloatDelegate(QStyledItemDelegate):
             }}
             """
         )
-
-        val = QDoubleValidator(self.minv, self.maxv, self.decimals, ed)
-        val.setNotation(QDoubleValidator.StandardNotation)  # sin científica
-        ed.setValidator(val)
+        ed.textEdited.connect(lambda _text, line_edit=ed: normalize_line_edit_text(line_edit, allow_negative=self.minv < 0.0))
         return ed
 
     def setEditorData(self, editor, index):
         s = index.data()
-        editor.setText("" if s is None else str(s))
+        editor.setText("" if s is None else normalize_decimal_text(str(s), allow_negative=self.minv < 0.0))
 
     def setModelData(self, editor, model, index):
-        t = (editor.text() or "").strip().replace(",", ".")
-        if t == "":
+        t = normalize_decimal_text(editor.text() or "", allow_negative=self.minv < 0.0)
+        if t in {"", "-", ".", "-."}:
             model.setData(index, "")
             return
-        try:
-            v = float(t)
-        except Exception:
+        v = try_parse_user_float(t, allow_negative=self.minv < 0.0)
+        if v is None or v < self.minv or v > self.maxv:
             model.setData(index, "")
             return
 
@@ -139,10 +141,8 @@ class NullableFloatDelegate(QStyledItemDelegate):
 
 class SpinBoxDelegate(QStyledItemDelegate):
     """
-    Editor con QDoubleSpinBox para tablas (solo números).
-    Nota: un SpinBox no puede quedar "vacío" real, por eso usamos:
-      - mínimo = 0
-      - specialValueText = ""  -> 0 se muestra en blanco
+    Editor numérico de tabla con texto normalizado.
+    Permite estados parciales y confirma el valor con rango min/max al cerrar.
     """
     def __init__(
         self,
@@ -162,15 +162,11 @@ class SpinBoxDelegate(QStyledItemDelegate):
         self.blank_is_min = bool(blank_is_min)
 
     def createEditor(self, parent, option, index):
-        sp = QDoubleSpinBox(parent)
-        sp.setRange(self.minv, self.maxv)
-        sp.setDecimals(self.decimals)
-        sp.setSingleStep(self.step)
-        sp.setKeyboardTracking(False)
-        sp.setAlignment(Qt.AlignCenter)
-        sp.setStyleSheet(
+        ed = QLineEdit(parent)
+        ed.setAlignment(Qt.AlignCenter)
+        ed.setStyleSheet(
             f"""
-            QDoubleSpinBox {{
+            QLineEdit {{
                 background-color: {TABLE_INPUT_BG};
                 color: {TABLE_TEXT_COLOR};
                 selection-background-color: {TABLE_SELECTION_BG};
@@ -178,23 +174,22 @@ class SpinBoxDelegate(QStyledItemDelegate):
             }}
             """
         )
-        if self.blank_is_min:
-            sp.setSpecialValueText("")  # si vale min -> se ve vacío
-        return sp
+        ed.textEdited.connect(lambda _text, line_edit=ed: normalize_line_edit_text(line_edit, allow_negative=self.minv < 0.0))
+        return ed
 
     def setEditorData(self, editor, index):
         txt = index.data()
-        t = "" if txt is None else str(txt).strip().replace(",", ".")
-        if t == "":
-            editor.setValue(self.minv)
-            return
-        try:
-            editor.setValue(float(t))
-        except Exception:
-            editor.setValue(self.minv)
+        editor.setText("" if txt is None else normalize_decimal_text(str(txt), allow_negative=self.minv < 0.0))
 
     def setModelData(self, editor, model, index):
-        v = float(editor.value())
+        t = normalize_decimal_text(editor.text() or "", allow_negative=self.minv < 0.0)
+        if t in {"", "-", ".", "-."}:
+            model.setData(index, "")
+            return
+        v = try_parse_user_float(t, allow_negative=self.minv < 0.0)
+        if v is None or v < self.minv or v > self.maxv:
+            model.setData(index, "")
+            return
         if self.blank_is_min and abs(v - self.minv) < 1e-12:
             model.setData(index, "")
             return
@@ -207,21 +202,36 @@ class FlexibleDoubleSpinBox(QDoubleSpinBox):
     SpinBox que acepta coma o punto decimal y permite visual en blanco
     usando specialValueText="" con mínimo como centinela.
     """
-    _PAT = re.compile(r"^[+-]?(\d+([.,]\d*)?|[.,]\d+)$")
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        try:
+            self.lineEdit().textEdited.connect(self._normalize_editor_text)
+        except Exception:
+            pass
+
+    def _allows_negative(self) -> bool:
+        return float(self.minimum()) < 0.0
+
+    def _normalize_editor_text(self, _text: str = "") -> None:
+        normalize_line_edit_text(self.lineEdit(), allow_negative=self._allows_negative())
 
     def validate(self, text: str, pos: int):
-        t = (text or "").strip()
-        if t == "":
+        normalized = normalize_decimal_text(text or "", allow_negative=self._allows_negative())
+        if normalized in {"", "-", ".", "-."}:
             return (QValidator.Intermediate, text, pos)
-        if self._PAT.match(t):
+        value = try_parse_user_float(normalized, allow_negative=self._allows_negative())
+        if value is None:
+            return (QValidator.Intermediate, text, pos)
+        if float(self.minimum()) <= value <= float(self.maximum()):
             return (QValidator.Acceptable, text, pos)
-        return (QValidator.Invalid, text, pos)
+        return (QValidator.Intermediate, text, pos)
 
     def valueFromText(self, text: str) -> float:
-        t = (text or "").strip().replace(",", ".")
-        if t == "":
+        value = try_parse_user_float(text or "", allow_negative=self._allows_negative())
+        if value is None:
             return float(self.minimum())
-        try:
-            return float(t)
-        except Exception:
-            return float(self.minimum())
+        return float(value)
+
+    def textFromValue(self, value: float) -> str:
+        text = super().textFromValue(value)
+        return normalize_decimal_text(text, allow_negative=self._allows_negative())

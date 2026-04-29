@@ -117,6 +117,10 @@ def _clean_text(value: Any) -> str:
     return normalize_spanish_text(str(value if value is not None else ""))
 
 
+def _piso_width_mm(card: Dict[str, Any]) -> Any:
+    return card.get("piso_width_mm", card.get("ancho_piso"))
+
+
 def _is_no_flex_demand_text(value: Any) -> bool:
     return "sin demanda" in _clean_text(value).lower()
 
@@ -503,13 +507,21 @@ def _add_row_memory(doc, card: Dict[str, Any], fs_required: float) -> None:
             ]
         )
     if card.get("piso_included"):
+        piso_width = _safe_float(_piso_width_mm(card))
+        piso_half_width = None if piso_width is None else piso_width / 2.0
+        piso_location = (
+            "Centrado en X = 0; y inferior = Y_top"
+            if piso_half_width is None
+            else f"x = -{_fmt_num(piso_half_width, 2)} a +{_fmt_num(piso_half_width, 2)} mm; y inferior = Y_top"
+        )
         kv_rows.extend(
             [
-                ("Piso colaborante", "Sí, placa rectangular centrada en X = 0"),
+                ("Piso", "Incluido"),
+                ("Piso estructural", "Sí, soldado a la estructura"),
                 ("Material piso", str(card.get("material_piso", "-") or "-")),
                 ("Espesor piso", f"{_fmt_num(card.get('espesor_piso'), 4)} mm"),
-                ("Ancho piso", f"{_fmt_num(card.get('ancho_piso'), 2)} mm"),
-                ("Ubicación piso", "x = -1215 a +1215 mm; y inferior = Y_top"),
+                ("Ancho piso [mm]", f"{_fmt_num(_piso_width_mm(card), 2)} mm"),
+                ("Ubicación piso", piso_location),
             ]
         )
     if card.get("chapon_included"):
@@ -562,15 +574,14 @@ def _add_row_memory(doc, card: Dict[str, Any], fs_required: float) -> None:
         optional_status.append("Bastidor lateral: activo, pero no incluido en esta sección.")
 
     if not card.get("include_piso"):
-        optional_status.append("Piso: no activado.")
-    elif not card.get("piso_structural"):
-        optional_status.append("Piso: activado, pero no considerado estructural; no se incluye en la sección resistente.")
+        optional_status.append("Piso: No incluido.")
     elif card.get("piso_included"):
         optional_status.append(
-            "Piso: incluido en la sección resistente. "
+            "Piso: Incluido en la sección resistente. "
+            "El piso se considera estructural cuando está incluido, debido a su vinculación soldada con la estructura. "
             f"Material: {str(card.get('material_piso', '-') or '-')}, "
             f"espesor: {_fmt_num(card.get('espesor_piso'), 4)} mm, "
-            f"ancho: {_fmt_num(card.get('ancho_piso'), 2)} mm."
+            f"ancho: {_fmt_num(_piso_width_mm(card), 2)} mm."
         )
     else:
         optional_status.append("Piso: activo, pero no incluido en esta sección.")

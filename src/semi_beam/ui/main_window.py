@@ -64,6 +64,7 @@ from semi_beam.services.study_storage import load_study_file, save_study_file
 from semi_beam.ui.section_check_panel import SectionCheckPanel
 from semi_beam.ui.memoria_header_dialog import MemoriaHeaderDialog
 from semi_beam.ui.reactions_tab import SemiTrailerReactionsTab
+from semi_beam.ui.number_parsing import normalize_decimal_text, try_parse_user_float
 
 
 # ============================================================
@@ -142,13 +143,7 @@ def _get_text(tbl: QTableWidget, r: int, c: int) -> str:
 
 
 def _try_float(s: str) -> Optional[float]:
-    t = (s or "").strip().replace(",", ".")
-    if t == "":
-        return None
-    try:
-        return float(t)
-    except Exception:
-        return None
+    return try_parse_user_float(s)
 
 
 def _spin_text(sp: QDoubleSpinBox) -> str:
@@ -162,13 +157,7 @@ def _spin_text(sp: QDoubleSpinBox) -> str:
 
 
 def _spin_value_or_none(sp: QDoubleSpinBox) -> Optional[float]:
-    t = _spin_text(sp).replace(",", ".")
-    if t == "":
-        return None
-    try:
-        return float(t)
-    except Exception:
-        return None
+    return try_parse_user_float(_spin_text(sp), allow_negative=float(sp.minimum()) < 0.0)
 
 
 def _is_reaction_label(label: str) -> bool:
@@ -273,13 +262,13 @@ class UnitTab(QWidget):
         self._setup_motor_spin(self.Lc, minv=1.0, maxv=1e12, decimals=2, step=50.0)
 
         self.x_front_or_kp = FlexibleDoubleSpinBox()
-        self._setup_motor_spin(self.x_front_or_kp, minv=-1e12, maxv=1e12, decimals=2, step=50.0)
+        self._setup_motor_spin(self.x_front_or_kp, minv=0.0, maxv=1e12, decimals=2, step=50.0)
 
         self.R_front_or_kp = FlexibleDoubleSpinBox()
-        self._setup_motor_spin(self.R_front_or_kp, minv=-1e12, maxv=1e12, decimals=2, step=50.0)
+        self._setup_motor_spin(self.R_front_or_kp, minv=0.0, maxv=1e12, decimals=2, step=50.0)
 
         self.Rt = FlexibleDoubleSpinBox()
-        self._setup_motor_spin(self.Rt, minv=-1e12, maxv=1e12, decimals=2, step=50.0)
+        self._setup_motor_spin(self.Rt, minv=0.0, maxv=1e12, decimals=2, step=50.0)
 
         # Direccional (semi/bitren)
         self.Rd = FlexibleDoubleSpinBox()
@@ -290,10 +279,10 @@ class UnitTab(QWidget):
 
         # Bitren Rp2
         self.x_rp2_rel = FlexibleDoubleSpinBox()
-        self._setup_motor_spin(self.x_rp2_rel, minv=-1e12, maxv=1e12, decimals=2, step=50.0)
+        self._setup_motor_spin(self.x_rp2_rel, minv=0.0, maxv=1e12, decimals=2, step=50.0)
 
         self.Rp2 = FlexibleDoubleSpinBox()
-        self._setup_motor_spin(self.Rp2, minv=-1e12, maxv=1e12, decimals=2, step=50.0)
+        self._setup_motor_spin(self.Rp2, minv=0.0, maxv=1e12, decimals=2, step=50.0)
 
         # Labels según tab
         if self.is_acoplado:
@@ -504,16 +493,11 @@ class UnitTab(QWidget):
         sp.editingFinished.connect(lambda s=sp: self._normalize_spin_editor_text(s))
 
     def _normalize_spin_editor_text(self, sp: QDoubleSpinBox):
-        t = _spin_text(sp).replace(",", ".")
-        if t == "":
+        value = _spin_value_or_none(sp)
+        if value is None:
             self._set_spin_blank(sp)
             return
-        try:
-            v = float(t)
-        except Exception:
-            self._set_spin_blank(sp)
-            return
-        sp.setValue(v)
+        sp.setValue(value)
 
     def _set_spin_blank(self, sp: QDoubleSpinBox):
         sp.setValue(float(sp.minimum()))
@@ -971,19 +955,23 @@ class UnitTab(QWidget):
                 cmb.setCurrentIndex(idx)
 
         def _set_spin_from_text(sp: QDoubleSpinBox, text: Any) -> None:
-            raw = "" if text is None else str(text).strip()
-            if raw == "":
+            raw = normalize_decimal_text("" if text is None else str(text), allow_negative=float(sp.minimum()) < 0.0)
+            if raw in {"", "-", ".", "-."}:
                 sp.setValue(float(sp.minimum()))
                 line_edit = sp.lineEdit()
                 if line_edit is not None:
                     line_edit.clear()
                 return
-            try:
-                sp.setValue(float(raw.replace(",", ".")))
-            except Exception:
+            value = try_parse_user_float(raw, allow_negative=float(sp.minimum()) < 0.0)
+            if value is None:
                 line_edit = sp.lineEdit()
                 if line_edit is not None:
                     line_edit.setText(raw)
+                return
+            try:
+                sp.setValue(float(value))
+            except Exception:
+                pass
 
         def _fill_table(tbl: QTableWidget, rows: Any) -> None:
             tbl.blockSignals(True)
@@ -1940,11 +1928,7 @@ class FBDApp(QMainWindow):
             return maxs, mins
 
         def _to_float_or_none(value: Any) -> Optional[float]:
-            try:
-                text = str(value or "").strip().replace(",", ".")
-                return None if text == "" else float(text)
-            except Exception:
-                return None
+            return try_parse_user_float(str(value or ""))
 
         tab = self.tab_reactions
         try:
@@ -2466,13 +2450,7 @@ class FBDApp(QMainWindow):
                 flex_rows = []
                 for r in sec_rows:
                     def _fv(key: str) -> Optional[float]:
-                        t = str(r.get(key, "") or "").strip().replace(",", ".")
-                        if t == "":
-                            return None
-                        try:
-                            return float(t)
-                        except Exception:
-                            return None
+                        return try_parse_user_float(str(r.get(key, "") or ""))
                     fs = _fv("FS")
                     if fs is not None:
                         fs_vals.append(fs)
@@ -2486,11 +2464,7 @@ class FBDApp(QMainWindow):
                     })
 
                 def _f_or_none(v: Any) -> Optional[float]:
-                    try:
-                        t = str(v).strip().replace(",", ".")
-                        return None if t == "" else float(t)
-                    except Exception:
-                        return None
+                    return try_parse_user_float(str(v))
 
                 sigma_candidates = [
                     _f_or_none(sec_data.get("sigma_top_kgcm2")),

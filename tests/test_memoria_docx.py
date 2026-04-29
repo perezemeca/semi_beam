@@ -389,8 +389,10 @@ def test_docx_renders_optional_component_status(tmp_path):
                     "bastidor_lateral_structural": False,
                     "bastidor_lateral_included": False,
                     "include_piso": True,
-                    "piso_structural": False,
-                    "piso_included": False,
+                    "piso_included": True,
+                    "piso_width_mm": 1800.0,
+                    "espesor_piso": 3.0,
+                    "material_piso": "F24",
                     "include_chapon": True,
                     "chapon_included": False,
                     "chapon_context_error": False,
@@ -403,5 +405,8 @@ def test_docx_renders_optional_component_status(tmp_path):
     assert "Bastidor lateral" in xml
     assert "no considerado estructural" in xml
     assert "Piso" in xml
+    assert "Ancho piso" in xml
+    assert "soldado a la estructura" in xml
+    assert "Piso: activado, pero no considerado estructural" not in xml
     assert "Chapón" in xml
     assert "fuera del tramo" in xml

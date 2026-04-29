@@ -45,6 +45,7 @@ from semi_beam.ui.numeric_delegate import (
     TABLE_READONLY_BG,
     TABLE_TEXT_COLOR,
 )
+from semi_beam.ui.number_parsing import try_parse_user_float
 
 
 class CollapsibleBox(QWidget):
@@ -117,13 +118,7 @@ def _get_text(tbl: QTableWidget, r: int, c: int) -> str:
 
 
 def _try_float(text: str) -> Optional[float]:
-    t = (text or "").strip().replace(",", ".")
-    if t == "":
-        return None
-    try:
-        return float(t)
-    except Exception:
-        return None
+    return try_parse_user_float(text)
 
 
 def _fmt_plain(v: Optional[float], decimals: int = 2) -> str:
@@ -523,10 +518,9 @@ class SemiTrailerReactionsTab(QWidget):
             value = state.get(key)
             if value is None:
                 return
-            try:
-                sp.setValue(float(value))
-            except Exception:
-                pass
+            parsed = try_parse_user_float(str(value), allow_negative=float(sp.minimum()) < 0.0)
+            if parsed is not None:
+                sp.setValue(float(parsed))
 
         self.blockSignals(True)
         self.tbl.blockSignals(True)

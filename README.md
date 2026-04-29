@@ -94,11 +94,14 @@ El calculo contempla materiales por componente y verificacion por componente. El
 
 ### Piso superior
 
-- Ancho: `2430 mm`.
+- Puede incluirse o no en la seccion resistente.
+- Cuando se incluye, se considera siempre estructural por su vinculacion soldada con la estructura.
+- Ancho editable, con valor inicial `2430 mm`.
 - Centrado en `X = 0`.
 - Ubicado sobre la planchuela superior.
 - Espesores disponibles: `2 mm`, `3 mm`, `4 mm`, `1/8"` y `3/16"`.
-- Puede activarse y marcarse como estructural para que participe en la seccion resistente.
+- El ancho de piso afecta la seccion compuesta, `Jx`, `Wcrit`, tensiones y `FS`.
+- Se elimino la opcion `piso estructural`: al activar el piso, siempre aporta como componente estructural.
 
 ### Chapon inferior
 

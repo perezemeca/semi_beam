@@ -9,7 +9,7 @@ from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QBrush
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QLabel,
-    QDoubleSpinBox, QComboBox, QPushButton, QTableWidget, QTableWidgetItem, QSizePolicy,
+    QComboBox, QPushButton, QTableWidget, QTableWidgetItem, QSizePolicy,
     QFileDialog, QMessageBox, QStyle, QCheckBox, QAbstractItemView
 )
 
@@ -30,6 +30,7 @@ from semi_beam.services.memoria_calculo_docx import (
 from semi_beam.ui.numeric_delegate import (
     NullableFloatDelegate,
     SpinBoxDelegate,
+    FlexibleDoubleSpinBox,
     apply_table_readability_style,
     combo_cell_style,
     TABLE_ERROR_BG,
@@ -38,6 +39,7 @@ from semi_beam.ui.numeric_delegate import (
     TABLE_READONLY_BG,
     TABLE_TEXT_COLOR,
 )
+from semi_beam.ui.number_parsing import try_parse_user_float
 
 from semi_beam.materials.material_db import MaterialDB, default_materials_path
 
@@ -106,13 +108,7 @@ def _get_text(tbl: QTableWidget, r: int, c: int) -> str:
 
 
 def _try_float(s: str) -> Optional[float]:
-    t = (s or "").strip().replace(",", ".")
-    if t == "":
-        return None
-    try:
-        return float(t)
-    except Exception:
-        return None
+    return try_parse_user_float(s)
 
 
 def _fmt2(v: float) -> str:
@@ -268,7 +264,7 @@ class SectionCheckPanel(QWidget):
         _configure_combo_for_contents(self.cmb_mat_web)
         _configure_combo_for_contents(self.cmb_mat_piso)
 
-        self.n_min = QDoubleSpinBox()
+        self.n_min = FlexibleDoubleSpinBox()
         self.n_min.setRange(1.0, 100.0)
         self.n_min.setDecimals(2)
         self.n_min.setValue(2.9)
@@ -277,7 +273,7 @@ class SectionCheckPanel(QWidget):
         self.chk_bastidor_lateral = QCheckBox("Agregar bastidor lateral")
         self.chk_bastidor_lateral_structural = QCheckBox("Bastidor lateral estructural")
         self.chk_bastidor_lateral_structural.setChecked(True)
-        self.n_bastidor_lateral_altura = QDoubleSpinBox()
+        self.n_bastidor_lateral_altura = FlexibleDoubleSpinBox()
         self.n_bastidor_lateral_altura.setRange(
             BASTIDOR_LATERAL_ALTURA_MIN_MM,
             BASTIDOR_LATERAL_ALTURA_MAX_MM,
@@ -288,8 +284,12 @@ class SectionCheckPanel(QWidget):
         self.n_bastidor_lateral_altura.setSuffix(" mm")
 
         self.chk_piso = QCheckBox("Agregar piso")
-        self.chk_piso_structural = QCheckBox("Piso estructural")
-        self.chk_piso_structural.setChecked(True)
+        self.n_piso_width = FlexibleDoubleSpinBox()
+        self.n_piso_width.setRange(0.01, 100000.0)
+        self.n_piso_width.setDecimals(1)
+        self.n_piso_width.setSingleStep(10.0)
+        self.n_piso_width.setValue(PISO_ANCHO_MM)
+        self.n_piso_width.setSuffix(" mm")
         self.cmb_espesor_piso = QComboBox()
         self._populate_piso_thickness_combo(default=3.0)
         _configure_combo_for_contents(self.cmb_espesor_piso)
@@ -311,7 +311,7 @@ class SectionCheckPanel(QWidget):
         form.addRow(self.chk_bastidor_lateral_structural)
         form.addRow("Altura bastidor lateral:", self.n_bastidor_lateral_altura)
         form.addRow(self.chk_piso)
-        form.addRow(self.chk_piso_structural)
+        form.addRow("Ancho piso [mm]:", self.n_piso_width)
         form.addRow("Espesor piso:", self.cmb_espesor_piso)
         form.addRow(self.chk_chapon)
         form.addRow("Espesor chapón SAE 1010:", self.cmb_espesor_chapon)
@@ -419,7 +419,7 @@ class SectionCheckPanel(QWidget):
         self.chk_bastidor_lateral_structural.toggled.connect(self._on_bastidor_lateral_changed)
         self.n_bastidor_lateral_altura.valueChanged.connect(self._on_bastidor_lateral_changed)
         self.chk_piso.toggled.connect(self._on_piso_changed)
-        self.chk_piso_structural.toggled.connect(self._on_piso_changed)
+        self.n_piso_width.valueChanged.connect(self._on_piso_changed)
         self.cmb_espesor_piso.currentTextChanged.connect(self._on_piso_changed)
         self.chk_chapon.toggled.connect(self._on_chapon_changed)
         self.cmb_espesor_chapon.currentTextChanged.connect(self._on_chapon_changed)
@@ -535,6 +535,9 @@ class SectionCheckPanel(QWidget):
         if data is None:
             return 0.0
         return float(data)
+
+    def _current_piso_width_mm(self) -> float:
+        return float(self.n_piso_width.value())
 
     def _current_chapon_thickness_mm(self) -> float:
         data = self.cmb_espesor_chapon.currentData()
@@ -734,14 +737,13 @@ class SectionCheckPanel(QWidget):
     # -------- Piso ----------
     def _update_piso_controls(self) -> None:
         enabled = bool(self.chk_piso.isChecked())
-        self.chk_piso_structural.setEnabled(enabled)
+        self.n_piso_width.setEnabled(enabled)
         self.cmb_espesor_piso.setEnabled(enabled)
         self.cmb_mat_piso.setEnabled(enabled)
 
     def _include_piso_in_geometry(self) -> bool:
         return (
             bool(self.chk_piso.isChecked())
-            and bool(self.chk_piso_structural.isChecked())
             and not bool(self._base_geometry_includes_piso)
         )
 
@@ -1178,11 +1180,12 @@ class SectionCheckPanel(QWidget):
 
     def _piso_rects(self, top_y_mm: float) -> list[SectionRect]:
         thickness = self._current_piso_thickness_mm()
+        width = self._current_piso_width_mm()
         return [
             SectionRect(
-                -PISO_ANCHO_MM / 2.0,
+                -width / 2.0,
                 float(top_y_mm),
-                PISO_ANCHO_MM,
+                width,
                 thickness,
                 "piso",
             )
@@ -1235,7 +1238,7 @@ class SectionCheckPanel(QWidget):
             bastidor_lateral_height_mm=float(self.n_bastidor_lateral_altura.value()) if include_bastidor else 0.0,
             includes_piso=include_piso,
             piso_thickness_mm=self._current_piso_thickness_mm() if include_piso else 0.0,
-            piso_width_mm=PISO_ANCHO_MM if include_piso else 0.0,
+            piso_width_mm=self._current_piso_width_mm() if include_piso else 0.0,
             includes_chapon=include_chapon,
             chapon_thickness_mm=self._current_chapon_thickness_mm() if include_chapon else 0.0,
             chapon_width_mm=CHAPON_ANCHO_MM if include_chapon else 0.0,
@@ -1862,11 +1865,10 @@ class SectionCheckPanel(QWidget):
                     "bastidor_lateral_included": isinstance(sec, CompositeSection) and sec.includes_bastidor_lateral,
                     "bastidor_lateral_height_mm": float(self.n_bastidor_lateral_altura.value()),
                     "include_piso": bool(self.chk_piso.isChecked()),
-                    "piso_structural": bool(self.chk_piso_structural.isChecked()),
                     "piso_included": isinstance(sec, CompositeSection) and sec.includes_piso,
                     "material_piso": self._current_material_id(self.cmb_mat_piso),
                     "espesor_piso": self._current_piso_thickness_mm(),
-                    "ancho_piso": PISO_ANCHO_MM,
+                    "piso_width_mm": self._current_piso_width_mm(),
                     "include_chapon": bool(self.chk_chapon.isChecked()),
                     "chapon_included": isinstance(sec, CompositeSection) and sec.includes_chapon,
                     "chapon_context_error": bool(chapon_context_error),
@@ -2062,11 +2064,10 @@ class SectionCheckPanel(QWidget):
             "bastidor_lateral_included": bool(self._include_bastidor_lateral_in_geometry()),
             "bastidor_lateral_height_mm": float(self.n_bastidor_lateral_altura.value()),
             "include_piso": bool(self.chk_piso.isChecked()),
-            "piso_structural": bool(self.chk_piso_structural.isChecked()),
             "piso_included": bool(self._include_piso_in_geometry()),
             "material_piso": self._current_material_id(self.cmb_mat_piso),
             "espesor_piso": self._current_piso_thickness_mm(),
-            "ancho_piso": PISO_ANCHO_MM,
+            "piso_width_mm": self._current_piso_width_mm(),
             "include_chapon": bool(self.chk_chapon.isChecked()),
             "chapon_included": bool(self.chk_chapon.isChecked() and self._chapon_end_mm() is not None),
             "chapon_context_error": bool(self._chapon_context_missing()),
@@ -2159,9 +2160,8 @@ class SectionCheckPanel(QWidget):
             "bastidor_lateral_structural": bool(self.chk_bastidor_lateral_structural.isChecked()),
             "bastidor_lateral_height_mm": float(self.n_bastidor_lateral_altura.value()),
             "include_piso": bool(self.chk_piso.isChecked()),
-            "piso_structural": bool(self.chk_piso_structural.isChecked()),
             "espesor_piso": self._current_piso_thickness_mm(),
-            "ancho_piso": PISO_ANCHO_MM,
+            "piso_width_mm": self._current_piso_width_mm(),
             "include_chapon": bool(self.chk_chapon.isChecked()),
             "chapon_context_error": bool(self._chapon_context_missing()),
             "chapon_context_missing_fields": self._chapon_context_missing_fields() if self._chapon_context_missing() else [],
@@ -2263,9 +2263,8 @@ class SectionCheckPanel(QWidget):
             "bastidor_lateral_structural": bool(self.chk_bastidor_lateral_structural.isChecked()),
             "bastidor_lateral_height_mm": float(self.n_bastidor_lateral_altura.value()),
             "include_piso": bool(self.chk_piso.isChecked()),
-            "piso_structural": bool(self.chk_piso_structural.isChecked()),
             "espesor_piso": self._current_piso_thickness_mm(),
-            "ancho_piso": PISO_ANCHO_MM,
+            "piso_width_mm": self._current_piso_width_mm(),
             "include_chapon": bool(self.chk_chapon.isChecked()),
             "espesor_chapon": self._current_chapon_thickness_mm(),
             "ancho_chapon": CHAPON_ANCHO_MM,
@@ -2312,7 +2311,11 @@ class SectionCheckPanel(QWidget):
                     pass
 
             self.chk_piso.setChecked(bool(state.get("include_piso", False)))
-            self.chk_piso_structural.setChecked(bool(state.get("piso_structural", True)))
+            piso_width = state.get("piso_width_mm", state.get("ancho_piso", PISO_ANCHO_MM))
+            try:
+                self.n_piso_width.setValue(float(piso_width))
+            except Exception:
+                self.n_piso_width.setValue(PISO_ANCHO_MM)
             espesor_piso = state.get("espesor_piso")
             if espesor_piso is not None:
                 try:

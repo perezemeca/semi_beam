@@ -40,7 +40,9 @@ def test_section_panel_exposes_new_thickness_options():
     piso_options = {panel.cmb_espesor_piso.itemData(i) for i in range(panel.cmb_espesor_piso.count())}
     assert panel.chk_piso.text() == "Agregar piso"
     assert panel.chk_piso.isChecked() is False
-    assert panel.chk_piso_structural.isChecked() is True
+    assert not hasattr(panel, "chk_piso_structural")
+    assert panel.n_piso_width.value() == 2430.0
+    assert panel.n_piso_width.isEnabled() is False
     assert {2.0, 3.0, 4.0, 3.175, 4.7625}.issubset(piso_options)
     assert panel.cmb_mat_piso.count() == panel.cmb_mat_top.count()
     chapon_options = {panel.cmb_espesor_chapon.itemData(i) for i in range(panel.cmb_espesor_chapon.count())}
@@ -72,7 +74,7 @@ def test_section_panel_adds_lateral_frame_only_when_structural():
     assert structural_jx > base_jx
 
 
-def test_section_panel_adds_floor_only_when_structural():
+def test_section_panel_floor_included_always_contributes_and_width_changes_properties():
     _app()
     panel = SectionCheckPanel()
     panel.set_moment_provider(lambda _x_mm: 125000.0)
@@ -82,25 +84,45 @@ def test_section_panel_adds_floor_only_when_structural():
     base_jx = float(panel.tbl.item(0, panel.COL_JX).text())
 
     panel.chk_piso.setChecked(True)
-    panel.chk_piso_structural.setChecked(False)
+    panel.n_piso_width.setValue(1000.0)
     panel._recompute_all()
-    non_structural_jx = float(panel.tbl.item(0, panel.COL_JX).text())
+    narrow_sec = panel._make_section(450.0, 0.25)
+    narrow_area = sum(rect.area_mm2 for rect in narrow_sec.rects)
+    narrow_jx = float(panel.tbl.item(0, panel.COL_JX).text())
 
-    panel.chk_piso_structural.setChecked(True)
+    panel.n_piso_width.setValue(2400.0)
     panel.cmb_espesor_piso.setCurrentIndex(panel.cmb_espesor_piso.findData(4.7625))
     panel._recompute_all()
-    structural_jx = float(panel.tbl.item(0, panel.COL_JX).text())
-    sec = panel._make_section(450.0, 0.25)
-    piso_rects = [r for r in sec.rects if r.label == "piso"]
+    wide_sec = panel._make_section(450.0, 0.25)
+    wide_area = sum(rect.area_mm2 for rect in wide_sec.rects)
+    wide_jx = float(panel.tbl.item(0, panel.COL_JX).text())
+    piso_rects = [r for r in wide_sec.rects if r.label == "piso"]
 
-    assert non_structural_jx == base_jx
-    assert structural_jx > base_jx
-    assert sec.includes_piso is True
+    assert narrow_jx > base_jx
+    assert wide_area > narrow_area
+    assert wide_jx != narrow_jx
+    assert wide_sec.includes_piso is True
     assert len(piso_rects) == 1
-    assert piso_rects[0].x0_mm == -1215.0
-    assert piso_rects[0].b_mm == 2430.0
-    assert piso_rects[0].y0_mm == sec.base_section.H_mm
+    assert piso_rects[0].x0_mm == -1200.0
+    assert piso_rects[0].b_mm == 2400.0
+    assert piso_rects[0].y0_mm == wide_sec.base_section.H_mm
     assert piso_rects[0].h_mm == 4.7625
+
+
+def test_section_panel_floor_not_included_does_not_contribute():
+    _app()
+    panel = SectionCheckPanel()
+    panel.set_moment_provider(lambda _x_mm: 125000.0)
+    panel.tbl.item(0, panel.COL_X).setText("1000")
+    panel.tbl.item(0, panel.COL_HWEB).setText("450")
+    panel.n_piso_width.setValue(2400.0)
+
+    sec = panel._make_section(450.0, 0.25)
+    panel._recompute_all()
+
+    assert isinstance(sec, ISection)
+    assert float(panel.tbl.item(0, panel.COL_JX).text()) > 0.0
+    assert all(getattr(rect, "label", "") != "piso" for rect in getattr(sec, "rects", ()))
 
 
 def test_section_panel_adds_chapon_only_inside_longitudinal_range():
@@ -244,6 +266,7 @@ def test_study_file_roundtrip_restores_ui_state(tmp_path):
     semi.section_panel.chk_bastidor_lateral.setChecked(True)
     semi.section_panel.n_bastidor_lateral_altura.setValue(150.0)
     semi.section_panel.chk_piso.setChecked(True)
+    semi.section_panel.n_piso_width.setValue(1800.0)
     semi.section_panel.cmb_espesor_piso.setCurrentIndex(semi.section_panel.cmb_espesor_piso.findData(3.175))
     semi.section_panel.cmb_mat_piso.setCurrentIndex(semi.section_panel.cmb_mat_piso.findData("F24"))
     semi.section_panel.chk_chapon.setChecked(True)
@@ -280,7 +303,7 @@ def test_study_file_roundtrip_restores_ui_state(tmp_path):
     assert restored_semi.section_panel.chk_bastidor_lateral_structural.isChecked() is True
     assert restored_semi.section_panel.n_bastidor_lateral_altura.value() == 150.0
     assert restored_semi.section_panel.chk_piso.isChecked() is True
-    assert restored_semi.section_panel.chk_piso_structural.isChecked() is True
+    assert restored_semi.section_panel.n_piso_width.value() == 1800.0
     assert restored_semi.section_panel.cmb_espesor_piso.currentData() == 3.175
     assert restored_semi.section_panel.cmb_mat_piso.currentData() == "F24"
     assert restored_semi.section_panel.chk_chapon.isChecked() is True
