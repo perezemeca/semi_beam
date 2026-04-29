@@ -10,7 +10,7 @@ from PySide6.QtGui import QColor, QBrush
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QLabel,
     QDoubleSpinBox, QComboBox, QPushButton, QTableWidget, QTableWidgetItem, QSizePolicy,
-    QFileDialog, QMessageBox, QStyle, QCheckBox
+    QFileDialog, QMessageBox, QStyle, QCheckBox, QAbstractItemView
 )
 
 import matplotlib
@@ -192,6 +192,13 @@ def _configure_combo_for_contents(cmb: QComboBox) -> None:
     _apply_width()
 
 
+def _configure_table_combo_for_cell(cmb: QComboBox) -> None:
+    cmb.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+    cmb.setMinimumContentsLength(0)
+    cmb.setMinimumWidth(0)
+    cmb.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+
 class SectionCheckPanel(QWidget):
     inertia_inputs_changed = Signal()
 
@@ -211,6 +218,9 @@ class SectionCheckPanel(QWidget):
     COL_WREQ = 12
     COL_SIGMAX = 13
 
+    INPUT_ITEM_COLUMNS = (COL_X, COL_HWEB, COL_DOUBLE_WEB_OFFSET)
+    RESULT_COLUMNS = (COL_FS, COL_M, COL_JX, COL_YBAR, COL_CMAX, COL_WCRIT, COL_WREQ, COL_SIGMAX)
+
     TFLANGE_OPTIONS = ["5/16", "3/8", "7/16", "1/2", "5/8", "3/4"]
     TWEB_OPTIONS = ["3/16", "1/4", "5/16", "3/8", "7/16", "1/2", "5/8"]
 
@@ -225,6 +235,7 @@ class SectionCheckPanel(QWidget):
         self._base_geometry_includes_piso = False
         self._beam_length_mm: Optional[float] = None
         self._king_pin_mm: Optional[float] = None
+        self._pending_recompute_after_edit = False
 
         self.mat_db: Optional[MaterialDB] = None
         self._load_material_db()
@@ -330,6 +341,7 @@ class SectionCheckPanel(QWidget):
             "Sección", "x [mm]", "h_viga [mm]", "Espesor", "Doble alma", "d alma [mm]", "FS", "M [kg·cm]",
             "Jx [cm^4]", "ȳ [cm]", "c_max [cm]", "Wcrit [cm^3]", "Wreq [cm^3]", "σmax [kg/cm²]"
         ])
+        self._ensure_table_edit_policy()
         self.tbl.horizontalHeader().setStretchLastSection(True)
         apply_table_readability_style(self.tbl)
 
@@ -358,7 +370,7 @@ class SectionCheckPanel(QWidget):
 
             cmb = QComboBox()
             self._populate_thickness_combo(cmb, self.TWEB_OPTIONS, default="1/4")
-            _configure_combo_for_contents(cmb)
+            _configure_table_combo_for_cell(cmb)
             cmb.setStyleSheet(combo_cell_style(TABLE_INPUT_BG))
             cmb.currentTextChanged.connect(lambda _t, rr=r: self._schedule_recompute())
             cmb.currentTextChanged.connect(lambda _t: self._emit_inertia_inputs_changed())
@@ -373,9 +385,14 @@ class SectionCheckPanel(QWidget):
             self._sync_double_web_row_controls(r)
 
         # Delegates numéricos
-        self.tbl.setItemDelegateForColumn(self.COL_X, NullableFloatDelegate(self, decimals=2, minv=-1e12, maxv=1e12))
-        self.tbl.setItemDelegateForColumn(self.COL_HWEB, SpinBoxDelegate(self, minv=0.0, maxv=5000.0, decimals=1, step=10.0))
-        self.tbl.setItemDelegateForColumn(self.COL_DOUBLE_WEB_OFFSET, NullableFloatDelegate(self, decimals=2, minv=0.0, maxv=1e12))
+        x_delegate = NullableFloatDelegate(self, decimals=2, minv=-1e12, maxv=1e12)
+        hweb_delegate = SpinBoxDelegate(self, minv=0.0, maxv=5000.0, decimals=1, step=10.0)
+        double_web_offset_delegate = NullableFloatDelegate(self, decimals=2, minv=0.0, maxv=1e12)
+        for delegate in (x_delegate, hweb_delegate, double_web_offset_delegate):
+            delegate.closeEditor.connect(self._on_input_editor_closed)
+        self.tbl.setItemDelegateForColumn(self.COL_X, x_delegate)
+        self.tbl.setItemDelegateForColumn(self.COL_HWEB, hweb_delegate)
+        self.tbl.setItemDelegateForColumn(self.COL_DOUBLE_WEB_OFFSET, double_web_offset_delegate)
 
         lay.addWidget(self.tbl)
 
@@ -422,6 +439,54 @@ class SectionCheckPanel(QWidget):
 
     def _emit_inertia_inputs_changed(self):
         self.inertia_inputs_changed.emit()
+
+    def _ensure_table_edit_policy(self) -> None:
+        self.tbl.setEditTriggers(
+            QAbstractItemView.DoubleClicked
+            | QAbstractItemView.EditKeyPressed
+            | QAbstractItemView.AnyKeyPressed
+            | QAbstractItemView.SelectedClicked
+        )
+
+    def _is_input_column(self, col: int) -> bool:
+        return col in self.INPUT_ITEM_COLUMNS
+
+    def _is_result_column(self, col: int) -> bool:
+        return col in self.RESULT_COLUMNS
+
+    def _is_user_editing_input_cell(self) -> bool:
+        return (
+            self.tbl.state() == QAbstractItemView.EditingState
+            and self._is_input_column(self.tbl.currentColumn())
+        )
+
+    def _on_input_editor_closed(self, *_args) -> None:
+        if self._pending_recompute_after_edit:
+            QTimer.singleShot(0, self._flush_pending_recompute_after_edit)
+
+    def _flush_pending_recompute_after_edit(self) -> None:
+        if not self._pending_recompute_after_edit:
+            return
+        if self._is_user_editing_input_cell():
+            QTimer.singleShot(50, self._flush_pending_recompute_after_edit)
+            return
+        self._pending_recompute_after_edit = False
+        self.refresh_results_from_context()
+
+    def _apply_row_editable_flags(self, row: int) -> None:
+        was_blocked = self.tbl.blockSignals(True)
+        try:
+            _set_item_editable(self.tbl, row, self.COL_SEC, False)
+            _set_item_editable(self.tbl, row, self.COL_X, True)
+            _set_item_editable(self.tbl, row, self.COL_HWEB, True)
+            _set_item_editable(self.tbl, row, self.COL_DOUBLE_WEB, False)
+            _set_item_editable(self.tbl, row, self.COL_DOUBLE_WEB_OFFSET, self._row_double_web_enabled(row))
+            _set_item_editable(self.tbl, row, self.COL_FS, False)
+            _set_item_editable(self.tbl, row, self.COL_M, False)
+            for c in [self.COL_JX, self.COL_YBAR, self.COL_CMAX, self.COL_WCRIT, self.COL_WREQ, self.COL_SIGMAX]:
+                _set_item_editable(self.tbl, row, c, False)
+        finally:
+            self.tbl.blockSignals(was_blocked)
 
     # -------- Materials ----------
     def _load_material_db(self):
@@ -509,8 +574,7 @@ class SectionCheckPanel(QWidget):
         }
 
     def _sync_double_web_row_controls(self, row: int) -> None:
-        enabled = self._row_double_web_enabled(row)
-        _set_item_editable(self.tbl, row, self.COL_DOUBLE_WEB_OFFSET, enabled)
+        self._apply_row_editable_flags(row)
 
     def _on_double_web_row_changed(self, row: int) -> None:
         self._sync_double_web_row_controls(row)
@@ -583,6 +647,15 @@ class SectionCheckPanel(QWidget):
     def set_shear_provider(self, fn: Optional[Callable[[float], float]]):
         self._shear_provider = fn
 
+    def refresh_results_from_context(self) -> None:
+        if self._is_user_editing_input_cell():
+            self._pending_recompute_after_edit = True
+            return
+        self._ensure_table_edit_policy()
+        for r in range(self.tbl.rowCount()):
+            self._auto_fill_M_for_row(r)
+        self._recompute_all()
+
     def set_deflection_context(self, result: Optional[Any], *, i_source: str = ""):
         if result is None:
             self._deflection_context = None
@@ -627,6 +700,7 @@ class SectionCheckPanel(QWidget):
             self._emit_inertia_inputs_changed()
 
     def clear_results_only(self, *, clear_moments_if_no_provider: bool = False):
+        self._ensure_table_edit_policy()
         self.tbl.blockSignals(True)
         for r in range(self.tbl.rowCount()):
             for c in [self.COL_FS, self.COL_JX, self.COL_YBAR, self.COL_CMAX, self.COL_WCRIT, self.COL_WREQ, self.COL_SIGMAX]:
@@ -1420,10 +1494,16 @@ class SectionCheckPanel(QWidget):
         self.tbl.blockSignals(False)
 
     def _schedule_recompute(self, *args):
-        # ✅ NO borrar foco (esto era lo que te impedía editar bien)
+        if self._is_user_editing_input_cell():
+            self._pending_recompute_after_edit = True
+            self._timer.stop()
+            return
         self._timer.start(120)
 
     def _set_row_color(self, r: int, ok: Optional[bool], *, paint_widgets: bool = True):
+        editing_input = self._is_user_editing_input_cell()
+        editing_row = self.tbl.currentRow() if editing_input else -1
+        editing_col = self.tbl.currentColumn() if editing_input else -1
         col_input = QBrush(QColor(TABLE_INPUT_BG))
         col_readonly = QBrush(QColor(TABLE_READONLY_BG))
         col_ok = QBrush(QColor(TABLE_OK_BG))
@@ -1449,6 +1529,8 @@ class SectionCheckPanel(QWidget):
                 it = QTableWidgetItem("")
                 it.setTextAlignment(Qt.AlignCenter)
                 self.tbl.setItem(r, c, it)
+            if r == editing_row and c == editing_col:
+                continue
             if c in editable_cols:
                 bg = col_input
             elif c in computed_cols:
@@ -1465,6 +1547,8 @@ class SectionCheckPanel(QWidget):
             chk = self.tbl.cellWidget(r, self.COL_DOUBLE_WEB)
             if chk is not None:
                 chk.setStyleSheet(combo_cell_style(TABLE_INPUT_BG))
+        if r != editing_row:
+            self._apply_row_editable_flags(r)
 
     def _set_out_cell(self, r: int, c: int, text: str):
         it = self.tbl.item(r, c)
@@ -1480,6 +1564,10 @@ class SectionCheckPanel(QWidget):
             self._set_out_cell(r, c, "")
 
     def _recompute_all(self):
+        if self._is_user_editing_input_cell():
+            self._pending_recompute_after_edit = True
+            self._timer.stop()
+            return
         nmin = float(self.n_min.value())
 
         for r in range(self.tbl.rowCount()):

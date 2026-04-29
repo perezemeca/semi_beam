@@ -478,6 +478,7 @@ class SemiTrailerReactionsTab(QWidget):
             self.section_panel.set_moment_provider(lambda x_mm: float(diag.eval_M(float(x_mm))) / 10.0)
             self.section_panel.set_shear_provider(lambda x_mm: float(diag.eval_V(float(x_mm))))
             self.section_panel.clear_results_only()
+            self.section_panel.refresh_results_from_context()
 
     def get_diag(self):
         return self._last_diag

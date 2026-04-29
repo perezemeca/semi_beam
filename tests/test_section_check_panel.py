@@ -2,7 +2,8 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication, QAbstractItemView, QSizePolicy
 
 from semi_beam.ui.section_check_panel import FLEX_NO_DEMAND_TEXT, SectionCheckPanel, build_web_rects
 
@@ -23,6 +24,106 @@ def _load_valid_row(panel: SectionCheckPanel, *, row: int = 0, x_mm: str = "1000
     panel.tbl.item(row, panel.COL_X).setText(x_mm)
     panel.tbl.item(row, panel.COL_HWEB).setText(h_web_mm)
     panel.tbl.item(row, panel.COL_M).setText(moment)
+
+
+def _is_editable(panel: SectionCheckPanel, row: int, col: int) -> bool:
+    item = panel.tbl.item(row, col)
+    assert item is not None
+    return bool(item.flags() & Qt.ItemIsEditable)
+
+
+def test_section_panel_editable_flags_survive_refresh_and_clear_results():
+    _app()
+    panel = SectionCheckPanel()
+    expected_triggers = (
+        QAbstractItemView.DoubleClicked
+        | QAbstractItemView.EditKeyPressed
+        | QAbstractItemView.AnyKeyPressed
+        | QAbstractItemView.SelectedClicked
+    )
+
+    assert panel.tbl.editTriggers() == expected_triggers
+    assert _is_editable(panel, 0, panel.COL_X) is True
+    assert _is_editable(panel, 0, panel.COL_HWEB) is True
+    assert _is_editable(panel, 0, panel.COL_DOUBLE_WEB_OFFSET) is False
+    assert _is_editable(panel, 0, panel.COL_SEC) is False
+    assert _is_editable(panel, 0, panel.COL_M) is False
+    assert _is_editable(panel, 0, panel.COL_FS) is False
+
+    panel._double_web_widgets[0].setChecked(True)
+    assert _is_editable(panel, 0, panel.COL_DOUBLE_WEB_OFFSET) is True
+
+    panel.set_moment_provider(lambda _x_mm: 125000.0)
+    panel.tbl.item(0, panel.COL_X).setText("1000")
+    panel.tbl.item(0, panel.COL_HWEB).setText("450")
+    panel.refresh_results_from_context()
+
+    assert panel.tbl.editTriggers() == expected_triggers
+    assert _cell(panel, 0, panel.COL_X) == "1000"
+    assert _cell(panel, 0, panel.COL_HWEB) == "450"
+    assert _cell(panel, 0, panel.COL_DOUBLE_WEB_OFFSET) == ""
+    assert _is_editable(panel, 0, panel.COL_X) is True
+    assert _is_editable(panel, 0, panel.COL_HWEB) is True
+    assert _is_editable(panel, 0, panel.COL_DOUBLE_WEB_OFFSET) is True
+    assert _is_editable(panel, 0, panel.COL_M) is False
+    assert _is_editable(panel, 0, panel.COL_FS) is False
+    assert _is_editable(panel, 0, panel.COL_JX) is False
+
+    panel.clear_results_only()
+
+    assert panel.tbl.editTriggers() == expected_triggers
+    assert _cell(panel, 0, panel.COL_X) == "1000"
+    assert _cell(panel, 0, panel.COL_HWEB) == "450"
+    assert _cell(panel, 0, panel.COL_DOUBLE_WEB_OFFSET) == ""
+    assert _is_editable(panel, 0, panel.COL_X) is True
+    assert _is_editable(panel, 0, panel.COL_HWEB) is True
+    assert _is_editable(panel, 0, panel.COL_DOUBLE_WEB_OFFSET) is True
+    assert _is_editable(panel, 0, panel.COL_M) is False
+    assert _is_editable(panel, 0, panel.COL_FS) is False
+
+
+def test_section_panel_defers_refresh_while_user_is_editing_input_cell(monkeypatch):
+    _app()
+    panel = SectionCheckPanel()
+    panel._double_web_widgets[0].setChecked(True)
+    panel.tbl.item(0, panel.COL_X).setText("1000")
+    panel.tbl.item(0, panel.COL_HWEB).setText("450")
+    panel.tbl.item(0, panel.COL_DOUBLE_WEB_OFFSET).setText("20")
+    panel.set_moment_provider(lambda _x_mm: 125000.0)
+    panel.tbl.item(0, panel.COL_M).setText("111")
+    panel.tbl.setCurrentCell(0, panel.COL_X)
+    monkeypatch.setattr(panel, "_is_user_editing_input_cell", lambda: True)
+
+    panel.refresh_results_from_context()
+
+    assert panel._pending_recompute_after_edit is True
+    assert _cell(panel, 0, panel.COL_X) == "1000"
+    assert _cell(panel, 0, panel.COL_HWEB) == "450"
+    assert _cell(panel, 0, panel.COL_DOUBLE_WEB_OFFSET) == "20"
+    assert _cell(panel, 0, panel.COL_M) == "111"
+    assert _cell(panel, 0, panel.COL_FS) == ""
+
+    monkeypatch.setattr(panel, "_is_user_editing_input_cell", lambda: False)
+    panel._flush_pending_recompute_after_edit()
+
+    assert panel._pending_recompute_after_edit is False
+    assert _cell(panel, 0, panel.COL_X) == "1000"
+    assert _cell(panel, 0, panel.COL_HWEB) == "450"
+    assert _cell(panel, 0, panel.COL_DOUBLE_WEB_OFFSET) == "20"
+    assert _cell(panel, 0, panel.COL_M) == "125000"
+    assert _cell(panel, 0, panel.COL_FS)
+    assert "ERR" not in _cell(panel, 0, panel.COL_FS)
+
+
+def test_section_panel_thickness_combo_uses_cell_width_policy():
+    _app()
+    panel = SectionCheckPanel()
+    combo = panel._tweb_widgets[0]
+
+    assert combo.minimumWidth() == 0
+    assert combo.maximumWidth() > 100000
+    assert combo.sizePolicy().horizontalPolicy() == QSizePolicy.Expanding
+    assert combo.currentData() == "1/4"
 
 
 def test_section_panel_zero_moment_shows_no_flex_demand_without_chapon_error():

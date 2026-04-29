@@ -293,6 +293,58 @@ def test_study_file_roundtrip_restores_ui_state(tmp_path):
     assert restored_reactions.offset.value() == 3700.0
 
 
+def _configure_solvable_new_study(window: FBDApp):
+    tab = window.tab_semi
+    window.tabs.setCurrentWidget(tab)
+    tab.Lc.setValue(13600.0)
+    tab.x_front_or_kp.setValue(1250.0)
+    tab.R_front_or_kp.setValue(9400.0)
+    tab.Rt.setValue(22200.0)
+    tab.chk_show_deflection.setChecked(False)
+    tab._add_point_row()
+    tab.tbl_points.item(0, 1).setText("2500")
+    tab.tbl_points.item(0, 2).setText("5000")
+    return tab
+
+
+def test_new_study_solve_refreshes_section_check_results_without_import_state():
+    _app()
+    window = FBDApp()
+    tab = _configure_solvable_new_study(window)
+    panel = tab.section_panel
+    panel.tbl.item(0, panel.COL_X).setText("1000")
+    panel.tbl.item(0, panel.COL_HWEB).setText("450")
+
+    window._solve_for_tab(tab)
+
+    fs_text = panel.tbl.item(0, panel.COL_FS).text()
+    assert panel.tbl.item(0, panel.COL_M).text()
+    assert fs_text
+    assert "ERR" not in fs_text
+    assert float(fs_text) > 0.0
+    window.close()
+
+
+def test_new_study_solve_refreshes_double_web_section_results_without_import_state():
+    _app()
+    window = FBDApp()
+    tab = _configure_solvable_new_study(window)
+    panel = tab.section_panel
+    panel._double_web_widgets[0].setChecked(True)
+    panel.tbl.item(0, panel.COL_DOUBLE_WEB_OFFSET).setText("20")
+    panel.tbl.item(0, panel.COL_X).setText("1000")
+    panel.tbl.item(0, panel.COL_HWEB).setText("450")
+
+    window._solve_for_tab(tab)
+
+    fs_text = panel.tbl.item(0, panel.COL_FS).text()
+    assert panel.tbl.item(0, panel.COL_M).text()
+    assert fs_text
+    assert "ERR" not in fs_text
+    assert float(fs_text) > 0.0
+    window.close()
+
+
 def test_window_title_shows_current_study_filename(tmp_path):
     _app()
     window = FBDApp()
