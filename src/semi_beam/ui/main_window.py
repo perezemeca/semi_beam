@@ -45,7 +45,9 @@ from semi_beam.view.renderer_fbd import render_fbd
 from semi_beam.domain.supports import FixedSupport, TandemSupport, DirectionalSupport
 from semi_beam.domain.unknowns import UnknownUniformLoad
 from semi_beam.domain.cases import BeamCase
+from semi_beam.domain.results import EquilibriumResult
 from semi_beam.engine.equilibrium import solve_equilibrium
+from semi_beam.engine.reactions import ReactionsResult, solve_reactions_2support
 from semi_beam.engine.deflection import compute_total_deflection
 from semi_beam.engine.diagrams import build_V_M
 from semi_beam.view.diagram_hover import DiagramHoverInspector, HoverCurve
@@ -196,6 +198,13 @@ def _fmt_plain(v, decimals: int = 2) -> str:
     return s
 
 
+def _point_value(points: List[PointForce], label: str, default: float = 0.0) -> float:
+    for pf in points:
+        if pf.label == label:
+            return float(pf.value_user)
+    return float(default)
+
+
 
 
 APP_VERSION = "1.0.0"
@@ -256,6 +265,11 @@ class UnitTab(QWidget):
         self.cmb_semi_tipo.setVisible(not self.is_acoplado and not self.is_bitren)  # solo semirremolque
 
         self.cmb_config = QComboBox()
+        self.chk_axis_lift = QCheckBox("Levante de eje")
+        self.chk_axis_lift.setToolTip(
+            "Agrega una carga puntual descendente automática para evaluar esfuerzos. "
+            "No modifica apoyos ni la posición calculada del tándem; recalcula reacciones."
+        )
 
         # --- Entradas motor comunes ---
         self.Lc = FlexibleDoubleSpinBox()
@@ -299,6 +313,7 @@ class UnitTab(QWidget):
             form.addRow("Tipo de semirremolque:", self.cmb_semi_tipo)
 
         form.addRow("Configuración de ejes:", self.cmb_config)
+        form.addRow("Simulación de levante:", self.chk_axis_lift)
 
         form.addRow(lbl_x, self.x_front_or_kp)
         form.addRow(lbl_r, self.R_front_or_kp)
@@ -515,7 +530,77 @@ class UnitTab(QWidget):
 
     def _config_uses_directional(self) -> bool:
         cfg = (self.cmb_config.currentText() or "").strip()
-        return (not self.is_acoplado) and (("1 + 2 ejes" in cfg) or ("1 + 3 ejes" in cfg))
+        compact = cfg.replace(" ", "")
+        return (not self.is_acoplado) and any(marker in compact for marker in ("1+2", "1+3", "1+1+1"))
+
+    def _axis_lift_mode(self) -> Optional[Tuple[str, str, float]]:
+        cfg = (self.cmb_config.currentText() or "").strip()
+        compact = cfg.replace(" ", "")
+        if any(marker in compact for marker in ("1+2", "1+3", "1+1+1")):
+            return ("directional", "Levantar direccional", 1300.0)
+        if cfg.startswith("2 ejes") or cfg.startswith("3 ejes"):
+            return ("first_axle", "Levantar primer eje", 1200.0)
+        return None
+
+    def _apply_axis_lift_ui(self):
+        mode = self._axis_lift_mode()
+        if mode is None:
+            self.chk_axis_lift.blockSignals(True)
+            self.chk_axis_lift.setChecked(False)
+            self.chk_axis_lift.blockSignals(False)
+            self.chk_axis_lift.setText("Levante de eje no aplicable")
+            self.chk_axis_lift.setEnabled(False)
+            return
+        _kind, label, kg = mode
+        self.chk_axis_lift.setText(f"{label} ({_fmt_plain(kg, 0)} kg automaticos)")
+        self.chk_axis_lift.setEnabled(True)
+
+    def axis_lift_enabled(self) -> bool:
+        return bool(self.chk_axis_lift.isEnabled() and self.chk_axis_lift.isChecked())
+
+    def _first_axle_offset_from_tandem_center(self) -> float:
+        cfg = (self.cmb_config.currentText() or "").strip()
+        if cfg.startswith("2 ejes"):
+            return 625.0
+        if cfg.startswith("3 ejes"):
+            return 1250.0
+        return 0.0
+
+    def axis_lift_load(self, *, x_t_mm: float, x_d_mm: Optional[float]) -> Optional[PointForce]:
+        if not self.axis_lift_enabled():
+            return None
+        mode = self._axis_lift_mode()
+        if mode is None:
+            return None
+        kind, _label, kg = mode
+        if kind == "directional":
+            if x_d_mm is None:
+                return None
+            x_mm = float(x_d_mm)
+            label = "P_levante_direccional"
+        elif self.is_acoplado:
+            x_front = _spin_value_or_none(self.x_front_or_kp)
+            if x_front is None:
+                return None
+            x_mm = float(x_front)
+            label = "P_levante_primer_eje"
+        else:
+            x_mm = float(x_t_mm) - self._first_axle_offset_from_tandem_center()
+            label = "P_levante_primer_eje"
+        return PointForce(label=label, x_mm=x_mm, value_user=kg)
+
+    def axis_lift_description(self, *, x_t_mm: float, x_d_mm: Optional[float]) -> Optional[str]:
+        load = self.axis_lift_load(x_t_mm=x_t_mm, x_d_mm=x_d_mm)
+        mode = self._axis_lift_mode()
+        if load is None or mode is None:
+            return None
+        _kind, label, _kg = mode
+        return (
+            f"{label}: carga puntual descendente automatica de {_fmt_plain(load.value_user, 0)} kg "
+            f"en x={_fmt_plain(load.x_mm, 0)} mm. No modifica x_t ni los apoyos; "
+            "las reacciones se recalculan con apoyos fijos para evaluar FBD, V(x), M(x) "
+            "y verificacion de seccion."
+        )
 
     def _apply_motor_enablement(self):
         uses_dir = self._config_uses_directional()
@@ -534,6 +619,7 @@ class UnitTab(QWidget):
         else:
             self.x_rp2_rel.setEnabled(False)
             self.Rp2.setEnabled(False)
+        self._apply_axis_lift_ui()
 
     def _validate_required_inputs(self) -> List[str]:
         errors: List[str] = []
@@ -720,13 +806,14 @@ class UnitTab(QWidget):
 
         else:
             tipo = self.cmb_semi_tipo.currentText().strip()
+            compact_cfg = cfg.replace(" ", "")
             self.R_front_or_kp.setValue(15000.0 if tipo == "Escalado" else 9000.0)
 
-            if "1 + 2 ejes" in cfg:
+            if "1+2" in compact_cfg or "1+1+1" in compact_cfg:
                 self.Rd.setValue(9200.0)
                 self.dir_offset.setValue(3075.0)
                 self.Rt.setValue(15800.0)
-            elif "1 + 3 ejes" in cfg:
+            elif "1+3" in compact_cfg:
                 self.Rd.setValue(9200.0)
                 self.dir_offset.setValue(3700.0)
                 self.Rt.setValue(22200.0)
@@ -936,6 +1023,7 @@ class UnitTab(QWidget):
                 "Rp2": _spin_text(self.Rp2),
             },
             "show_deflection": bool(self.chk_show_deflection.isChecked()),
+            "axis_lift_enabled": self.axis_lift_enabled(),
             "view_mode": self.view_mode(),
             "tbl_points": _table_rows(self.tbl_points),
             "tbl_dists": _table_rows(self.tbl_dists),
@@ -1011,6 +1099,7 @@ class UnitTab(QWidget):
                 _set_spin_from_text(spin, motor_inputs.get(key))
 
         self.chk_show_deflection.setChecked(bool(state.get("show_deflection", True)))
+        self.chk_axis_lift.setChecked(bool(state.get("axis_lift_enabled", False)) and self.chk_axis_lift.isEnabled())
         _fill_table(self.tbl_points, state.get("tbl_points"))
         _fill_table(self.tbl_dists, state.get("tbl_dists"))
         _fill_table(self.tbl_moms, state.get("tbl_moms"))
@@ -1144,6 +1233,7 @@ class FBDApp(QMainWindow):
             tab.tbl_points.cellChanged.connect(lambda *_, t=tab: self._schedule_replot_tab(t, reset_solution=True))
             tab.tbl_dists.cellChanged.connect(lambda *_, t=tab: self._schedule_replot_tab(t, reset_solution=True))
             tab.tbl_moms.cellChanged.connect(lambda *_, t=tab: self._schedule_replot_tab(t, reset_solution=True))
+            tab.chk_axis_lift.toggled.connect(lambda *_, t=tab: self._schedule_axis_lift_replot(t))
             tab.chk_show_deflection.toggled.connect(lambda *_, t=tab: self._schedule_replot_tab(t, reset_solution=False))
             tab.section_panel.inertia_inputs_changed.connect(lambda t=tab: self._schedule_replot_tab(t, reset_solution=False))
 
@@ -1347,6 +1437,14 @@ class FBDApp(QMainWindow):
         if tab is self.active_tab():
             self._redraw_timer.start(90)
 
+    def _schedule_axis_lift_replot(self, tab: UnitTab):
+        keep_solved = tab.view_mode() == "solved"
+        tab.set_cache(None)
+        tab.set_diag(None)
+        tab.set_view_mode("solved" if keep_solved else "inputs")
+        if tab is self.active_tab():
+            self._redraw_timer.start(90)
+
     def _current_style(self) -> RenderStyle:
         return RenderStyle()
 
@@ -1435,6 +1533,48 @@ class FBDApp(QMainWindow):
             "err_m0_pct": err_m0_pct,
             "top_terms": top_terms,
         }
+
+    def _solve_final_equilibrium_with_axis_lift(
+        self,
+        *,
+        tab: UnitTab,
+        case: BeamCase,
+        base_result: EquilibriumResult,
+        beam_L_mm: float,
+    ) -> Tuple[EquilibriumResult, Optional[PointForce], Optional[ReactionsResult]]:
+        lift_load = tab.axis_lift_load(x_t_mm=float(base_result.x_t_mm), x_d_mm=base_result.x_d_mm)
+        if lift_load is None:
+            return base_result, None, None
+
+        external_points = list(case.point_forces) + [lift_load]
+        final_loads = [*external_points, *base_result.solved_dist_loads, *base_result.solved_moments]
+
+        x_k = float(case.kingpin.x_mm)
+        x_t = float(base_result.x_t_mm)
+        reaction_result = solve_reactions_2support(float(beam_L_mm), (x_k, x_t), final_loads)
+        support_points = [
+            PointForce(label=case.kingpin.label, x_mm=x_k, value_user=float(reaction_result.reacciones["R_A"])),
+            PointForce(label=case.tandem.label, x_mm=x_t, value_user=float(reaction_result.reacciones["R_B"])),
+        ]
+
+        notes = list(base_result.notes)
+        notes.append(
+            "Levante de eje incluido en equilibrio final: se recalcularon reacciones entre apoyo delantero "
+            "y tandem con x_t conservado."
+        )
+        notes.extend(reaction_result.notes)
+        final_result = EquilibriumResult(
+            x_t_mm=float(base_result.x_t_mm),
+            q_user_kg_per_mm=float(base_result.q_user_kg_per_mm),
+            x_d_mm=None if base_result.x_d_mm is None else float(base_result.x_d_mm),
+            residual_Fy=float(reaction_result.Fy_total_residual),
+            residual_M0=float(reaction_result.M0_residual),
+            notes=notes,
+            solved_point_forces=[*external_points, *support_points],
+            solved_dist_loads=list(base_result.solved_dist_loads),
+            solved_moments=list(base_result.solved_moments),
+        )
+        return final_result, lift_load, reaction_result
 
     def _compute_deflection_result(
         self,
@@ -1744,6 +1884,12 @@ class FBDApp(QMainWindow):
                 L_viga_total = float(Lc)
 
             beam_plot = Beam(L_mm=L_viga_total)
+            res, lift_load, reaction_result = self._solve_final_equilibrium_with_axis_lift(
+                tab=tab,
+                case=case,
+                base_result=res,
+                beam_L_mm=float(beam_plot.L_mm),
+            )
 
             support_positions = [float(kingpin.x_mm), float(res.x_t_mm)]
             if res.x_d_mm is not None:
@@ -1789,6 +1935,16 @@ class FBDApp(QMainWindow):
                 note_lines.append(f"Bitren: x_Rp2_abs = {_fmt_plain(x_rp2_abs, 0)} mm")
             if res.x_d_mm is not None:
                 note_lines.append(f"x_d = {_fmt_plain(res.x_d_mm, 0)} mm")
+            lift_desc = tab.axis_lift_description(x_t_mm=float(res.x_t_mm), x_d_mm=res.x_d_mm)
+            if lift_desc is not None:
+                note_lines.append(lift_desc)
+            if reaction_result is not None:
+                note_lines.append("Reacciones recalculadas con levante y apoyos fijos:")
+                for pf in cache.points:
+                    if pf.label in {"Rp1", "Rd", "Rt", "Rp2"}:
+                        note_lines.append(
+                            f"  {pf.label}: x={_fmt_plain(pf.x_mm, 0)} mm -> R={_fmt_plain(pf.value_user, 2)} kg"
+                        )
 
             if maxs:
                 note_lines.append("Máximos locales M(x) [kg·cm]:")
@@ -2092,6 +2248,15 @@ class FBDApp(QMainWindow):
                     ],
                 )
 
+                apoyos = [
+                    ("Rp1", f"x={_fmt_plain(case.kingpin.x_mm, 0)} mm; R={_fmt_plain(_point_value(res.solved_point_forces, 'Rp1', case.kingpin.reaction_user), 2)} kg"),
+                    ("Rt", f"x={_fmt_plain(res.x_t_mm, 0)} mm; R={_fmt_plain(_point_value(res.solved_point_forces, 'Rt', case.tandem.reaction_user), 2)} kg"),
+                ]
+                if case.hitch is not None and lift_load is None:
+                    apoyos.append(("Rp2", f"x={_fmt_plain(case.hitch.x_mm, 0)} mm; R={_fmt_plain(_point_value(res.solved_point_forces, 'Rp2', case.hitch.reaction_user), 2)} kg"))
+                if case.directional is not None and lift_load is None:
+                    apoyos.append(("Rd", f"x={_fmt_plain(res.x_d_mm, 0) if res.x_d_mm is not None else '-'} mm; R={_fmt_plain(_point_value(res.solved_point_forces, 'Rd', case.directional.reaction_user), 2)} kg"))
+
                 cargas = []
                 for load in loads:
                     if isinstance(load, PointForce):
@@ -2290,6 +2455,12 @@ class FBDApp(QMainWindow):
 
             L_viga_total = float(res.x_t_mm) + 2070.0 if tab.is_bitren else float(Lc)
             beam_plot = Beam(L_mm=L_viga_total)
+            res, lift_load, reaction_result = self._solve_final_equilibrium_with_axis_lift(
+                tab=tab,
+                case=case,
+                base_result=res,
+                beam_L_mm=float(beam_plot.L_mm),
+            )
             xlim = _compute_x_view(beam_plot.L_mm, res.solved_point_forces, res.solved_dist_loads, res.solved_moments)
             diag = build_V_M(
                 beam_L_mm=beam_plot.L_mm,
@@ -2406,6 +2577,16 @@ class FBDApp(QMainWindow):
                 cargas = []
                 for pf in case.point_forces:
                     cargas.append((pf.label, f"P: x={_fmt_plain(pf.x_mm, 0)} mm; P={_fmt_plain(pf.value_user, 2)} kg"))
+                if lift_load is not None:
+                    cargas.append((
+                        lift_load.label,
+                        (
+                            f"Levante automatico: x={_fmt_plain(lift_load.x_mm, 0)} mm; "
+                            f"P={_fmt_plain(lift_load.value_user, 2)} kg descendente. "
+                            "No modifica la posicion calculada del tandem; las reacciones se recalculan "
+                            "con apoyos fijos para evaluar esfuerzos."
+                        ),
+                    ))
                 for dl in case.dist_loads:
                     cargas.append((dl.label, f"q: x0={_fmt_plain(dl.x0_mm, 0)} mm; L={_fmt_plain(dl.Lq_mm, 0)} mm; q={_fmt_plain(dl.q_user, 6)} kg/mm"))
                 for pm in case.moments:
