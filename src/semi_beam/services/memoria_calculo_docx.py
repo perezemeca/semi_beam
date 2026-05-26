@@ -389,8 +389,8 @@ def _add_theory_section(doc) -> None:
         "planchuela inferior, alma y planchuela superior. Si se activan componentes estructurales "
         "adicionales, la sección se evalúa como una geometría compuesta con dos perfiles C laterales "
         "y/o una placa de piso centrada sobre la cara superior. Si se activa el chapón inferior, "
-        "se suma como placa de refuerzo SAE 1010 solo en las estaciones ubicadas entre el inicio de "
-        "la viga y 1000 mm después del perno rey. El análisis es elástico lineal y considera flexión "
+        "se suma como placa de refuerzo SAE 1010 solo en las estaciones ubicadas entre el inicio "
+        "del largo carrozable y el largo de chapón ingresado por el usuario. El análisis es elástico lineal y considera flexión "
         "simple en el eje fuerte de la sección.",
         font_size=9,
         color="111827",
@@ -532,9 +532,10 @@ def _add_row_memory(doc, card: Dict[str, Any], fs_required: float) -> None:
                 ("Espesor chapón", f"{_fmt_num(card.get('espesor_chapon'), 4)} mm"),
                 ("Ancho chapón", f"{_fmt_num(card.get('ancho_chapon'), 2)} mm"),
                 ("Ubicación transversal chapón", "x = -525 a +525 mm; cara superior contra la planchuela inferior"),
+                ("Largo chapón ingresado", f"{_fmt_num(card.get('chapon_length_mm', card.get('chapon_x_end_mm')), 0)} mm"),
                 (
                     "Tramo longitudinal chapón",
-                    f"x = {_fmt_num(card.get('chapon_x_start_mm'), 0)} a {_fmt_num(card.get('chapon_x_end_mm'), 0)} mm",
+                    f"x = {_fmt_num(card.get('chapon_x_start_mm'), 0)} a {_fmt_num(card.get('chapon_x_end_mm'), 0)} mm, medido desde el inicio del largo carrozable",
                 ),
             ]
         )
@@ -589,18 +590,19 @@ def _add_row_memory(doc, card: Dict[str, Any], fs_required: float) -> None:
     if not card.get("include_chapon"):
         optional_status.append("Chapón: no activado.")
     elif card.get("chapon_context_error") and not no_flex_demand:
-        optional_status.append("Chapón: activo, pero no verificable por falta de contexto longitudinal.")
+        optional_status.append("Chapón: activo, pero no verificable por largo de chapón inválido.")
         missing_fields = [str(field) for field in list(card.get("chapon_context_missing_fields") or []) if str(field).strip()]
         optional_status.append(f"Campos faltantes del chapón: {', '.join(missing_fields) if missing_fields else 'No informado'}.")
     elif card.get("chapon_context_error"):
-        optional_status.append("Chapón: activo; no se evalúa contexto longitudinal porque no hay demanda de flexión.")
+        optional_status.append("Chapón: activo; no se evalúa el largo porque no hay demanda de flexión.")
     elif card.get("chapon_included"):
         optional_status.append(
             "Chapón: incluido en esta estación. "
             f"Material: {str(card.get('material_chapon', 'SAE1010') or 'SAE1010')}, "
             f"espesor: {_fmt_num(card.get('espesor_chapon'), 4)} mm, "
             f"ancho: {_fmt_num(card.get('ancho_chapon'), 2)} mm, "
-            f"tramo: 0 a {_fmt_num(card.get('chapon_x_end_mm'), 0)} mm."
+            f"largo ingresado: {_fmt_num(card.get('chapon_length_mm', card.get('chapon_x_end_mm')), 0)} mm "
+            "medido desde el inicio del largo carrozable."
         )
     elif _safe_float(card.get("x_mm")) is None:
         optional_status.append("Chapón: activo, pero no incluido porque falta la estación x de la fila.")
@@ -669,7 +671,7 @@ def _add_row_memory(doc, card: Dict[str, Any], fs_required: float) -> None:
         if chapon_context_error:
             _add_paragraph(
                 doc,
-                "ERR CHAPÓN - Sección no verificable por falta de contexto longitudinal",
+                "ERR CHAPÓN - Sección no verificable por largo de chapón inválido",
                 bold=True,
                 font_size=9.3,
                 color="B00020",
@@ -680,7 +682,7 @@ def _add_row_memory(doc, card: Dict[str, Any], fs_required: float) -> None:
             _add_kv_table(doc, [("Campos faltantes", fields_text)])
             _add_paragraph(
                 doc,
-                "Se debe definir largo de viga y posición de perno para determinar si el chapón aplica.",
+                "Se debe ingresar un largo de chapón mayor que cero, medido desde el inicio del largo carrozable.",
                 font_size=8.9,
                 color="111827",
                 spacing_after_pt=4,

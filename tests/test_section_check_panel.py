@@ -147,7 +147,6 @@ def test_section_panel_zero_moment_shows_no_flex_demand_without_chapon_error():
 def test_section_panel_composite_payload_includes_table_values():
     _app()
     panel = SectionCheckPanel()
-    panel.set_beam_context(largo_viga_mm=5000.0, posicion_perno_mm=1000.0)
     panel.chk_bastidor_lateral.setChecked(True)
     panel.chk_piso.setChecked(True)
     panel.chk_chapon.setChecked(True)
@@ -173,6 +172,7 @@ def test_section_panel_err_chapon_when_context_missing():
     _app()
     panel = SectionCheckPanel()
     panel.chk_chapon.setChecked(True)
+    panel.n_chapon_length.setValue(0.0)
     _load_valid_row(panel)
 
     panel._recompute_all()
@@ -182,10 +182,7 @@ def test_section_panel_err_chapon_when_context_missing():
     assert cards
     card = cards[0]
     assert card["chapon_context_error"] is True
-    assert {
-        "largo_viga_mm",
-        "posicion_perno_mm",
-    }.intersection(card["chapon_context_missing_fields"])
+    assert "chapon_length_mm" in card["chapon_context_missing_fields"]
     assert card["ok"] is False
     assert card["fs_text"] == "ERR CHAPÓN"
 

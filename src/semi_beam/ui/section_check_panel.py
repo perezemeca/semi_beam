@@ -60,7 +60,7 @@ PISO_ESPESOR_OPTIONS_MM = (
 )
 CHAPON_MATERIAL_ID = "SAE1010"
 CHAPON_ANCHO_MM = 1050.0
-CHAPON_EXTENSION_PERNO_MM = 1000.0
+CHAPON_LENGTH_DEFAULT_MM = 2000.0
 CHAPON_ESPESOR_OPTIONS_MM = (
     ('1/4" - 6.35 mm', 6.35),
     ('5/16" - 7.9375 mm', 7.9375),
@@ -229,8 +229,6 @@ class SectionCheckPanel(QWidget):
         self.n_beams = 2
         self._base_geometry_includes_bastidor_lateral = False
         self._base_geometry_includes_piso = False
-        self._beam_length_mm: Optional[float] = None
-        self._king_pin_mm: Optional[float] = None
         self._pending_recompute_after_edit = False
 
         self.mat_db: Optional[MaterialDB] = None
@@ -294,6 +292,13 @@ class SectionCheckPanel(QWidget):
         self._populate_piso_thickness_combo(default=3.0)
         _configure_combo_for_contents(self.cmb_espesor_piso)
         self.chk_chapon = QCheckBox("Agregar chapón")
+        self.n_chapon_length = FlexibleDoubleSpinBox()
+        self.n_chapon_length.setRange(0.0, 100000.0)
+        self.n_chapon_length.setDecimals(1)
+        self.n_chapon_length.setSingleStep(100.0)
+        self.n_chapon_length.setValue(CHAPON_LENGTH_DEFAULT_MM)
+        self.n_chapon_length.setSuffix(" mm")
+        self.n_chapon_length.setToolTip("Medido desde el inicio del largo carrozable (x = 0).")
         self.cmb_espesor_chapon = QComboBox()
         self._populate_chapon_thickness_combo(default=6.35)
         _configure_combo_for_contents(self.cmb_espesor_chapon)
@@ -314,6 +319,7 @@ class SectionCheckPanel(QWidget):
         form.addRow("Ancho piso [mm]:", self.n_piso_width)
         form.addRow("Espesor piso:", self.cmb_espesor_piso)
         form.addRow(self.chk_chapon)
+        form.addRow("Largo chapón [mm]:", self.n_chapon_length)
         form.addRow("Espesor chapón SAE 1010:", self.cmb_espesor_chapon)
 
         lay.addLayout(form)
@@ -422,6 +428,7 @@ class SectionCheckPanel(QWidget):
         self.n_piso_width.valueChanged.connect(self._on_piso_changed)
         self.cmb_espesor_piso.currentTextChanged.connect(self._on_piso_changed)
         self.chk_chapon.toggled.connect(self._on_chapon_changed)
+        self.n_chapon_length.valueChanged.connect(self._on_chapon_changed)
         self.cmb_espesor_chapon.currentTextChanged.connect(self._on_chapon_changed)
 
         self.tbl.itemSelectionChanged.connect(self._repaint_preview_from_selection)
@@ -680,27 +687,7 @@ class SectionCheckPanel(QWidget):
         largo_viga_mm: Optional[float] = None,
         posicion_perno_mm: Optional[float] = None,
     ) -> None:
-        def _coerce(value: Optional[float]) -> Optional[float]:
-            if value is None:
-                return None
-            try:
-                out = float(value)
-            except Exception:
-                return None
-            return out if math.isfinite(out) else None
-
-        new_length = _coerce(largo_viga_mm)
-        new_pin = _coerce(posicion_perno_mm)
-        changed = (
-            self._beam_length_mm != new_length
-            or self._king_pin_mm != new_pin
-        )
-        self._beam_length_mm = new_length
-        self._king_pin_mm = new_pin
-        if changed:
-            self._repaint_preview_from_selection()
-            self._schedule_recompute()
-            self._emit_inertia_inputs_changed()
+        return
 
     def clear_results_only(self, *, clear_moments_if_no_provider: bool = False):
         self._ensure_table_edit_policy()
@@ -755,19 +742,26 @@ class SectionCheckPanel(QWidget):
 
     # -------- Chapón inferior ----------
     def _update_chapon_controls(self) -> None:
-        self.cmb_espesor_chapon.setEnabled(bool(self.chk_chapon.isChecked()))
+        enabled = bool(self.chk_chapon.isChecked())
+        self.n_chapon_length.setEnabled(enabled)
+        self.cmb_espesor_chapon.setEnabled(enabled)
+
+    def _chapon_length_mm(self) -> Optional[float]:
+        try:
+            value = float(self.n_chapon_length.value())
+        except Exception:
+            return None
+        if not math.isfinite(value) or value <= 0.0:
+            return None
+        return value
 
     def _chapon_end_mm(self) -> Optional[float]:
-        if self._beam_length_mm is None or self._king_pin_mm is None:
-            return None
-        return min(float(self._beam_length_mm), float(self._king_pin_mm) + CHAPON_EXTENSION_PERNO_MM)
+        return self._chapon_length_mm()
 
     def _chapon_context_missing_fields(self) -> list[str]:
         missing: list[str] = []
-        if self._beam_length_mm is None:
-            missing.append("largo_viga_mm")
-        if self._king_pin_mm is None:
-            missing.append("posicion_perno_mm")
+        if self._chapon_length_mm() is None:
+            missing.append("chapon_length_mm")
         return missing
 
     def _chapon_context_missing(self) -> bool:
@@ -1878,6 +1872,7 @@ class SectionCheckPanel(QWidget):
                     "material_chapon": CHAPON_MATERIAL_ID,
                     "espesor_chapon": self._current_chapon_thickness_mm(),
                     "ancho_chapon": CHAPON_ANCHO_MM,
+                    "chapon_length_mm": self._chapon_length_mm(),
                     "chapon_x_start_mm": 0.0,
                     "chapon_x_end_mm": self._chapon_end_mm(),
                     "moment_kgcm": M_value,
@@ -2075,10 +2070,9 @@ class SectionCheckPanel(QWidget):
             "material_chapon": CHAPON_MATERIAL_ID,
             "espesor_chapon": self._current_chapon_thickness_mm(),
             "ancho_chapon": CHAPON_ANCHO_MM,
+            "chapon_length_mm": self._chapon_length_mm(),
             "chapon_x_start_mm": 0.0,
             "chapon_x_end_mm": self._chapon_end_mm(),
-            "largo_viga_mm": self._beam_length_mm,
-            "posicion_perno_mm": self._king_pin_mm,
             "deflection_context": dict(self._deflection_context) if self._deflection_context else None,
         }
 
@@ -2168,10 +2162,9 @@ class SectionCheckPanel(QWidget):
             "material_chapon": CHAPON_MATERIAL_ID,
             "espesor_chapon": self._current_chapon_thickness_mm(),
             "ancho_chapon": CHAPON_ANCHO_MM,
+            "chapon_length_mm": self._chapon_length_mm(),
             "chapon_x_start_mm": 0.0,
             "chapon_x_end_mm": self._chapon_end_mm(),
-            "largo_viga_mm": self._beam_length_mm,
-            "posicion_perno_mm": self._king_pin_mm,
             "deflection": dict(self._deflection_context) if self._deflection_context else None,
             "rows": [],
         }
@@ -2268,10 +2261,9 @@ class SectionCheckPanel(QWidget):
             "include_chapon": bool(self.chk_chapon.isChecked()),
             "espesor_chapon": self._current_chapon_thickness_mm(),
             "ancho_chapon": CHAPON_ANCHO_MM,
+            "chapon_length_mm": self._chapon_length_mm() or CHAPON_LENGTH_DEFAULT_MM,
             "chapon_x_start_mm": 0.0,
             "chapon_x_end_mm": self._chapon_end_mm(),
-            "largo_viga_mm": self._beam_length_mm,
-            "posicion_perno_mm": self._king_pin_mm,
             "rows": rows,
         }
 
@@ -2324,15 +2316,17 @@ class SectionCheckPanel(QWidget):
                     pass
 
             self.chk_chapon.setChecked(bool(state.get("include_chapon", False)))
+            chapon_length = state.get("chapon_length_mm", CHAPON_LENGTH_DEFAULT_MM)
+            try:
+                self.n_chapon_length.setValue(float(chapon_length))
+            except Exception:
+                self.n_chapon_length.setValue(CHAPON_LENGTH_DEFAULT_MM)
             espesor_chapon = state.get("espesor_chapon")
             if espesor_chapon is not None:
                 try:
                     _set_combo_data(self.cmb_espesor_chapon, float(espesor_chapon))
                 except Exception:
                     pass
-            self._beam_length_mm = _try_float(str(state.get("largo_viga_mm", "") or ""))
-            self._king_pin_mm = _try_float(str(state.get("posicion_perno_mm", "") or ""))
-
             rows = state.get("rows")
             if isinstance(rows, list):
                 for r in range(self.tbl.rowCount()):

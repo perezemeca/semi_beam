@@ -165,16 +165,16 @@ def test_docx_renders_non_verifiable_chapon_context_error(tmp_path):
                     "fs_text": "ERR CHAPÓN",
                     "ok": False,
                     "chapon_context_error": True,
-                    "chapon_context_missing_fields": ["largo_viga_mm", "posicion_perno_mm"],
+                    "chapon_context_missing_fields": ["chapon_length_mm"],
                 }
             ],
         },
     )
 
     assert "ERR CHAPÓN" in xml
-    assert "contexto longitudinal" in xml
-    assert "largo_viga_mm" in xml
-    assert "posicion_perno_mm" in xml
+    assert "largo de chap" in xml
+    assert "chapon_length_mm" in xml
+    assert "posicion_perno_mm" not in xml
     assert "FS = 0.0000" not in xml
     assert "FS = 0,0000" not in xml
 
@@ -325,7 +325,7 @@ def test_docx_renders_no_flex_demand_without_inf_or_chapon_error(tmp_path):
                     "ok": True,
                     "include_chapon": True,
                     "chapon_context_error": True,
-                    "chapon_context_missing_fields": ["largo_viga_mm", "posicion_perno_mm"],
+                    "chapon_context_missing_fields": ["chapon_length_mm"],
                     "moment_kgcm": 0.0,
                     "table_values": {
                         "FS": no_demand_text,
@@ -410,3 +410,35 @@ def test_docx_renders_optional_component_status(tmp_path):
     assert "Piso: activado, pero no considerado estructural" not in xml
     assert "Chapón" in xml
     assert "fuera del tramo" in xml
+
+
+def test_docx_renders_user_chapon_length_without_old_rule(tmp_path):
+    xml = _export_with_verification(
+        tmp_path,
+        {
+            "fs_required": 1.5,
+            "n_beams": 1,
+            "cards": [
+                {
+                    "sec": "1",
+                    "x_mm": "1500",
+                    "fs_text": "2.31",
+                    "ok": True,
+                    "include_chapon": True,
+                    "chapon_included": True,
+                    "chapon_context_error": False,
+                    "material_chapon": "SAE1010",
+                    "espesor_chapon": 7.9375,
+                    "ancho_chapon": 1050.0,
+                    "chapon_length_mm": 2750.0,
+                    "chapon_x_start_mm": 0.0,
+                    "chapon_x_end_mm": 2750.0,
+                }
+            ],
+        },
+    )
+
+    assert "Largo chap" in xml
+    assert "2750" in xml
+    assert "inicio del largo carrozable" in xml
+    assert "perno" not in xml.lower()

@@ -110,8 +110,9 @@ El calculo contempla materiales por componente y verificacion por componente. El
 - Ubicado bajo la planchuela inferior.
 - Material: SAE 1010.
 - Espesores disponibles: `1/4"`, `5/16"` y `3/8"`.
-- Tramo longitudinal considerado: desde `x = 0` hasta `posicion_perno_mm + 1000 mm`.
-- Requiere contexto longitudinal de largo de viga y posicion de perno para determinar si aplica en cada estacion.
+- El usuario ingresa el largo del chapon en mm.
+- Tramo longitudinal considerado: desde `x = 0` del largo carrozable hasta `largo_chapon_mm`.
+- No depende de la posicion del perno rey para determinar si aplica en cada estacion.
 
 ### Doble alma de viga
 
@@ -127,7 +128,7 @@ El calculo contempla materiales por componente y verificacion por componente. El
 El verificador distingue fallas resistentes numericas de secciones no verificables por falta de datos.
 
 - `ERR MAT`: falta material admisible para un componente activo incluido en la seccion resistente. La fila no se considera verificada hasta corregir la base de materiales o la asignacion de material.
-- `ERR CHAPON`: el chapon esta activo, pero falta contexto longitudinal para evaluar su inclusion. Se debe definir largo de viga y posicion de perno.
+- `ERR CHAPON`: el chapon esta activo, pero el largo de chapon ingresado no es valido. Se debe definir un valor mayor que cero.
 - `ERR DOBLE ALMA`: la doble alma esta activa, pero la distancia ingresada no permite una geometria verificable dentro del ancho de la planchuela.
 
 Estos estados tambien se exportan a la memoria DOCX sin convertirlos en `FS = 0`.
