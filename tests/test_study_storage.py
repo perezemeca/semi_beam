@@ -128,7 +128,6 @@ def test_section_panel_floor_not_included_does_not_contribute():
 def test_section_panel_adds_chapon_only_inside_longitudinal_range():
     _app()
     panel = SectionCheckPanel()
-    panel.set_beam_context(largo_viga_mm=5000.0, posicion_perno_mm=1000.0)
     panel.set_moment_provider(lambda _x_mm: 125000.0)
     panel.tbl.item(0, panel.COL_X).setText("1500")
     panel.tbl.item(0, panel.COL_HWEB).setText("450")
@@ -139,6 +138,7 @@ def test_section_panel_adds_chapon_only_inside_longitudinal_range():
     base_outside_jx = float(panel.tbl.item(1, panel.COL_JX).text())
 
     panel.chk_chapon.setChecked(True)
+    panel.n_chapon_length.setValue(2000.0)
     panel.cmb_espesor_chapon.setCurrentIndex(panel.cmb_espesor_chapon.findData(9.525))
     panel._recompute_all()
     inside_jx = float(panel.tbl.item(0, panel.COL_JX).text())
@@ -157,11 +157,16 @@ def test_section_panel_adds_chapon_only_inside_longitudinal_range():
     assert chapon_rects[0].y0_mm == -9.525
     assert chapon_rects[0].h_mm == 9.525
 
+    panel.n_chapon_length.setValue(3000.0)
+    panel._recompute_all()
+    extended_sec = panel._make_section(450.0, 0.25, station_mm=2500.0)
+    assert extended_sec.includes_chapon is True
+    assert extended_sec.chapon_end_mm == 3000.0
+
 
 def test_section_panel_governs_by_component_when_all_reinforcements_are_active():
     _app()
     panel = SectionCheckPanel()
-    panel.set_beam_context(largo_viga_mm=5000.0, posicion_perno_mm=1000.0)
     panel.set_moment_provider(lambda _x_mm: 250000.0)
     for combo, mat_id in (
         (panel.cmb_mat_top, "STR900MC"),
@@ -270,6 +275,7 @@ def test_study_file_roundtrip_restores_ui_state(tmp_path):
     semi.section_panel.cmb_espesor_piso.setCurrentIndex(semi.section_panel.cmb_espesor_piso.findData(3.175))
     semi.section_panel.cmb_mat_piso.setCurrentIndex(semi.section_panel.cmb_mat_piso.findData("F24"))
     semi.section_panel.chk_chapon.setChecked(True)
+    semi.section_panel.n_chapon_length.setValue(2750.0)
     semi.section_panel.cmb_espesor_chapon.setCurrentIndex(semi.section_panel.cmb_espesor_chapon.findData(7.9375))
     semi.section_panel._double_web_widgets[0].setChecked(True)
     semi.section_panel.tbl.item(0, semi.section_panel.COL_DOUBLE_WEB_OFFSET).setText("20")
@@ -307,6 +313,7 @@ def test_study_file_roundtrip_restores_ui_state(tmp_path):
     assert restored_semi.section_panel.cmb_espesor_piso.currentData() == 3.175
     assert restored_semi.section_panel.cmb_mat_piso.currentData() == "F24"
     assert restored_semi.section_panel.chk_chapon.isChecked() is True
+    assert restored_semi.section_panel.n_chapon_length.value() == 2750.0
     assert restored_semi.section_panel.cmb_espesor_chapon.currentData() == 7.9375
     assert restored_semi.section_panel._row_double_web_enabled(0) is True
     assert restored_semi.section_panel._row_double_web_offset_mm(0) == 20.0
@@ -314,6 +321,45 @@ def test_study_file_roundtrip_restores_ui_state(tmp_path):
     assert restored_semi.section_panel.tbl.item(0, restored_semi.section_panel.COL_HWEB).text() == "450"
     assert restored_reactions.mode.currentIndex() == 1
     assert restored_reactions.offset.value() == 3700.0
+
+
+def test_axis_lift_state_roundtrip_and_old_default(tmp_path):
+    _app()
+    window = FBDApp()
+    semi = window.tab_semi
+    semi.chk_axis_lift.setChecked(True)
+
+    payload = window._export_study_state()
+    assert payload["tabs"]["semirremolque"]["axis_lift_enabled"] is True
+
+    study_path = tmp_path / "axis_lift.sbeam"
+    save_study_file(study_path, payload)
+
+    restored = FBDApp()
+    restored._apply_study_state(load_study_file(study_path))
+    assert restored.tab_semi.chk_axis_lift.isChecked() is True
+
+    old_payload = window._export_study_state()
+    del old_payload["tabs"]["semirremolque"]["axis_lift_enabled"]
+    restored_old = FBDApp()
+    restored_old._apply_study_state(old_payload)
+    assert restored_old.tab_semi.chk_axis_lift.isChecked() is False
+
+    window.close()
+    restored.close()
+    restored_old.close()
+
+
+def test_section_panel_import_old_state_uses_default_chapon_length():
+    _app()
+    panel = SectionCheckPanel()
+
+    panel.import_state({"include_chapon": True, "espesor_chapon": 6.35, "rows": []})
+
+    assert panel.chk_chapon.isChecked() is True
+    assert panel.n_chapon_length.value() == 2000.0
+    state = panel.export_state()
+    assert state["chapon_length_mm"] == 2000.0
 
 
 def _configure_solvable_new_study(window: FBDApp):
@@ -328,6 +374,116 @@ def _configure_solvable_new_study(window: FBDApp):
     tab.tbl_points.item(0, 1).setText("2500")
     tab.tbl_points.item(0, 2).setText("5000")
     return tab
+
+
+def _point_by_label(points, label: str):
+    matches = [p for p in points if p.label == label]
+    assert len(matches) == 1
+    return matches[0]
+
+
+def test_axis_lift_adds_single_first_axle_load_without_moving_tandem():
+    _app()
+    window = FBDApp()
+    tab = _configure_solvable_new_study(window)
+
+    window._solve_for_tab(tab)
+    base_cache = tab.get_cache()
+    assert base_cache is not None
+    base_rp1 = _point_by_label(base_cache.points, "Rp1")
+    base_rt = _point_by_label(base_cache.points, "Rt")
+    sample_x = float(base_rt.x_mm) - 500.0
+    base_v = float(tab.get_diag().eval_V(sample_x))
+    base_m = float(tab.get_diag().eval_M(sample_x))
+    assert [p for p in base_cache.points if p.label.startswith("P_levante")] == []
+
+    tab.chk_axis_lift.setChecked(True)
+    window._replot_active_tab()
+    lifted_cache = tab.get_cache()
+    assert lifted_cache is not None
+    lifted_rp1 = _point_by_label(lifted_cache.points, "Rp1")
+    lifted_rt = _point_by_label(lifted_cache.points, "Rt")
+    lift_loads = [p for p in lifted_cache.points if p.label == "P_levante_primer_eje"]
+
+    assert len(lift_loads) == 1
+    assert lift_loads[0].value_user == 1200.0
+    assert lift_loads[0].x_mm == lifted_rt.x_mm - 625.0
+    assert lifted_rt.x_mm == base_rt.x_mm
+    assert lifted_rt.value_user != base_rt.value_user
+    assert (lifted_rp1.value_user, lifted_rt.value_user) != (base_rp1.value_user, base_rt.value_user)
+    assert tab.view_mode() == "solved"
+    assert float(tab.get_diag().eval_V(sample_x)) != base_v
+    assert float(tab.get_diag().eval_M(sample_x)) != base_m
+    assert abs(float(tab.get_diag().eval_V(lifted_cache.beam_plot.L_mm))) < 1e-6
+    assert abs(float(tab.get_diag().eval_M(lifted_cache.beam_plot.L_mm))) < 1e-3
+
+    tab.chk_axis_lift.setChecked(False)
+    window._replot_active_tab()
+    disabled_cache = tab.get_cache()
+    assert disabled_cache is not None
+    assert [p for p in disabled_cache.points if p.label.startswith("P_levante")] == []
+    assert float(tab.get_diag().eval_V(sample_x)) == base_v
+    assert float(tab.get_diag().eval_M(sample_x)) == base_m
+
+    tab.chk_axis_lift.setChecked(True)
+    window._replot_active_tab()
+    window._solve_for_tab(tab)
+    solved_again = tab.get_cache()
+    assert solved_again is not None
+    assert len([p for p in solved_again.points if p.label == "P_levante_primer_eje"]) == 1
+    window.close()
+
+
+def test_axis_lift_directional_load_uses_directional_position():
+    _app()
+    window = FBDApp()
+    tab = _configure_solvable_new_study(window)
+    tab.cmb_config.setCurrentText("1 + 2 ejes — Rd 9200 (offset 3075) + Rt 15800")
+    tab.Rd.setValue(9200.0)
+    tab.dir_offset.setValue(3075.0)
+    tab.chk_axis_lift.setChecked(True)
+
+    window._solve_for_tab(tab)
+
+    cache = tab.get_cache()
+    assert cache is not None
+    rt = _point_by_label(cache.points, "Rt")
+    lift_load = _point_by_label(cache.points, "P_levante_direccional")
+    assert "Levantar direccional" in tab.chk_axis_lift.text()
+    assert lift_load.value_user == 1300.0
+    assert lift_load.x_mm == rt.x_mm - tab.dir_offset.value()
+    assert [p for p in cache.points if p.label == "Rd"] == []
+    assert abs(float(tab.get_diag().eval_V(cache.beam_plot.L_mm))) < 1e-6
+    assert abs(float(tab.get_diag().eval_M(cache.beam_plot.L_mm))) < 1e-3
+    window.close()
+
+
+def test_axis_lift_treats_1_1_1_as_directional_lift():
+    _app()
+    window = FBDApp()
+    tab = window.tab_semi
+    tab.cmb_config.addItem("1 + 1 + 1 ejes — Rd 9200 (offset 3075) + Rt 15800")
+    tab.cmb_config.setCurrentText("1 + 1 + 1 ejes — Rd 9200 (offset 3075) + Rt 15800")
+    tab._apply_config_defaults()
+
+    assert tab.chk_axis_lift.isEnabled() is True
+    assert "Levantar direccional" in tab.chk_axis_lift.text()
+    assert tab.Rd.value() == 9200.0
+    assert tab.dir_offset.value() == 3075.0
+    window.close()
+
+
+def test_axis_lift_disabled_for_non_applicable_configuration():
+    _app()
+    window = FBDApp()
+    tab = window.tab_acoplado
+    tab.cmb_config.setCurrentText("4 ejes conv — 15800 / 15800")
+    tab.chk_axis_lift.setChecked(True)
+    tab._apply_config_defaults()
+
+    assert tab.chk_axis_lift.isEnabled() is False
+    assert tab.chk_axis_lift.isChecked() is False
+    window.close()
 
 
 def test_new_study_solve_refreshes_section_check_results_without_import_state():
