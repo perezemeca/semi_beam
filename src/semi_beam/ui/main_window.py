@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
     QLabel, QDoubleSpinBox, QPushButton, QTableWidget, QTableWidgetItem,
     QSizePolicy, QSplitter, QScrollArea, QTabWidget, QMessageBox, QFileDialog,
-    QToolButton, QFrame, QComboBox, QDialog, QCheckBox
+    QToolButton, QFrame, QComboBox, QDialog, QCheckBox, QGroupBox, QAbstractItemView
 )
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 
@@ -29,6 +29,7 @@ from semi_beam.ui.numeric_delegate import (
     NullableFloatDelegate,
     FlexibleDoubleSpinBox,
     apply_table_readability_style,
+    combo_cell_style,
     TABLE_INPUT_BG,
     TABLE_READONLY_BG,
     TABLE_TEXT_COLOR,
@@ -39,6 +40,7 @@ from semi_beam.domain.beam import Beam
 from semi_beam.domain.loads import PointForce, DistUniform, PointMoment
 from semi_beam.domain.labels import p_index, next_free_p_index, to_internal_Fy, to_internal_w_up
 from semi_beam.engine.normalize import normalize_inputs
+from semi_beam.engine.constraints import check_no_overlap, dist_interval
 from semi_beam.view.style import RenderStyle
 from semi_beam.view.renderer_fbd import render_fbd
 
@@ -230,6 +232,13 @@ class SessionCache:
 # Un TAB completo (estado independiente)
 # ============================================================
 class UnitTab(QWidget):
+    COL_TYPE = 0
+    COL_MAG = 1
+    COL_POS = 2
+    COL_LEN = 3
+
+    LOAD_TYPES = ["Puntual", "Distribuida", "Momento"]
+
     def __init__(self, title: str, *, is_bitren: bool = False, is_acoplado: bool = False):
         super().__init__()
         self.title = title
@@ -242,7 +251,17 @@ class UnitTab(QWidget):
 
         self._all_boxes: List[CollapsibleBox] = []
 
-        root = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        self.content_scroll = QScrollArea()
+        self.content_scroll.setWidgetResizable(True)
+        self.content_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        outer.addWidget(self.content_scroll)
+
+        content = QWidget()
+        self.content_scroll.setWidget(content)
+        root = QVBoxLayout(content)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(10)
 
@@ -342,81 +361,32 @@ class UnitTab(QWidget):
         # Inicializar opciones de config
         self._populate_configs()
 
-        # ==========================
-        # Collapsible: Puntuales
-        # ==========================
-        p_box = CollapsibleBox("Fuerzas puntuales conocidas (P1, P2, ...)")
-        self._all_boxes.append(p_box)
-        root.addWidget(p_box)
-        p_v = p_box.content_layout()
+        load_box = QGroupBox("Cargas")
+        load_lay = QVBoxLayout(load_box)
+        load_lay.addWidget(QLabel("Magnitud: kg para puntuales y distribuidas (P total), kg·mm para momentos."))
+        self.tbl = QTableWidget(0, 4)
+        self.tbl.setHorizontalHeaderLabels(["Tipo", "Magnitud", "Posición / centro [mm]", "Longitud [mm]"])
+        self.tbl.horizontalHeader().setStretchLastSection(True)
+        apply_table_readability_style(self.tbl)
+        self.tbl.setEditTriggers(
+            QAbstractItemView.DoubleClicked
+            | QAbstractItemView.EditKeyPressed
+            | QAbstractItemView.AnyKeyPressed
+            | QAbstractItemView.SelectedClicked
+        )
+        self.tbl.setItemDelegateForColumn(self.COL_MAG, NullableFloatDelegate(self, decimals=2, minv=-1e18, maxv=1e18))
+        self.tbl.setItemDelegateForColumn(self.COL_POS, NullableFloatDelegate(self, decimals=2, minv=-1e12, maxv=1e12))
+        self.tbl.setItemDelegateForColumn(self.COL_LEN, NullableFloatDelegate(self, decimals=2, minv=0.0, maxv=1e12))
+        load_lay.addWidget(self.tbl)
 
-        self.tbl_points = QTableWidget(0, 3)
-        self.tbl_points.setHorizontalHeaderLabels(["label", "x_mm", "valor_kg"])
-        self.tbl_points.horizontalHeader().setStretchLastSection(True)
-        apply_table_readability_style(self.tbl_points)
-        p_v.addWidget(self.tbl_points)
-
-        p_btns = QHBoxLayout()
-        self.btn_add_p = QPushButton("Agregar fuerza")
-        self.btn_del_p = QPushButton("Eliminar seleccionadas")
-        p_btns.addWidget(self.btn_add_p)
-        p_btns.addWidget(self.btn_del_p)
-        p_btns.addStretch(1)
-        p_v.addLayout(p_btns)
-
-        self.tbl_points.setItemDelegateForColumn(1, NullableFloatDelegate(self, decimals=2, minv=-1e12, maxv=1e12))
-        self.tbl_points.setItemDelegateForColumn(2, NullableFloatDelegate(self, decimals=2, minv=-1e12, maxv=1e12))
-
-        # ==========================
-        # Collapsible: Distribuidas
-        # ==========================
-        q_box = CollapsibleBox("Cargas distribuidas conocidas (kg/mm)")
-        self._all_boxes.append(q_box)
-        root.addWidget(q_box)
-        q_v = q_box.content_layout()
-
-        self.tbl_dists = QTableWidget(0, 4)
-        self.tbl_dists.setHorizontalHeaderLabels(["label", "x0_mm", "Lq_mm", "q_kg_per_mm"])
-        self.tbl_dists.horizontalHeader().setStretchLastSection(True)
-        apply_table_readability_style(self.tbl_dists)
-        q_v.addWidget(self.tbl_dists)
-
-        q_btns = QHBoxLayout()
-        self.btn_add_q = QPushButton("Agregar distribuida")
-        self.btn_del_q = QPushButton("Eliminar seleccionadas")
-        q_btns.addWidget(self.btn_add_q)
-        q_btns.addWidget(self.btn_del_q)
-        q_btns.addStretch(1)
-        q_v.addLayout(q_btns)
-
-        self.tbl_dists.setItemDelegateForColumn(1, NullableFloatDelegate(self, decimals=2, minv=-1e12, maxv=1e12))
-        self.tbl_dists.setItemDelegateForColumn(2, NullableFloatDelegate(self, decimals=2, minv=-1e12, maxv=1e12))
-        self.tbl_dists.setItemDelegateForColumn(3, NullableFloatDelegate(self, decimals=6, minv=-1e12, maxv=1e12))
-
-        # ==========================
-        # Collapsible: Momentos
-        # ==========================
-        m_box = CollapsibleBox("Momentos puntuales (kg·mm, CCW+)")
-        self._all_boxes.append(m_box)
-        root.addWidget(m_box)
-        m_v = m_box.content_layout()
-
-        self.tbl_moms = QTableWidget(0, 3)
-        self.tbl_moms.setHorizontalHeaderLabels(["label", "x_mm", "M_kgmm"])
-        self.tbl_moms.horizontalHeader().setStretchLastSection(True)
-        apply_table_readability_style(self.tbl_moms)
-        m_v.addWidget(self.tbl_moms)
-
-        m_btns = QHBoxLayout()
-        self.btn_add_m = QPushButton("Agregar momento")
-        self.btn_del_m = QPushButton("Eliminar seleccionadas")
-        m_btns.addWidget(self.btn_add_m)
-        m_btns.addWidget(self.btn_del_m)
-        m_btns.addStretch(1)
-        m_v.addLayout(m_btns)
-
-        self.tbl_moms.setItemDelegateForColumn(1, NullableFloatDelegate(self, decimals=2, minv=-1e12, maxv=1e12))
-        self.tbl_moms.setItemDelegateForColumn(2, NullableFloatDelegate(self, decimals=2, minv=-1e18, maxv=1e18))
+        load_btns = QHBoxLayout()
+        self.btn_add_load = QPushButton("Agregar carga")
+        self.btn_del_load = QPushButton("Eliminar seleccionadas")
+        load_btns.addWidget(self.btn_add_load)
+        load_btns.addWidget(self.btn_del_load)
+        load_btns.addStretch(1)
+        load_lay.addLayout(load_btns)
+        root.addWidget(load_box)
 
         # ==========================
         # Collapsible: Verificador
@@ -470,16 +440,10 @@ class UnitTab(QWidget):
 
         root.addStretch(1)
 
-        # Señales tablas
-        self.btn_add_p.clicked.connect(self._add_point_row)
-        self.btn_del_p.clicked.connect(lambda: self._remove_selected_rows(self.tbl_points))
-        self.btn_add_q.clicked.connect(self._add_dist_row)
-        self.btn_del_q.clicked.connect(lambda: self._remove_selected_rows(self.tbl_dists))
-        self.btn_add_m.clicked.connect(self._add_mom_row)
-        self.btn_del_m.clicked.connect(lambda: self._remove_selected_rows(self.tbl_moms))
-        self.tbl_points.itemChanged.connect(lambda *_: self._refresh_table_edit_locks(self.tbl_points))
-        self.tbl_dists.itemChanged.connect(lambda *_: self._refresh_table_edit_locks(self.tbl_dists))
-        self.tbl_moms.itemChanged.connect(lambda *_: self._refresh_table_edit_locks(self.tbl_moms))
+        # Señales tabla de cargas
+        self.btn_add_load.clicked.connect(self._add_load_row)
+        self.btn_del_load.clicked.connect(self._remove_selected_rows)
+        self.tbl.cellChanged.connect(lambda *_: None)
 
         # Señales config (autocompletar reacciones)
         self.cmb_config.currentIndexChanged.connect(lambda _i: self._apply_config_defaults())
@@ -650,36 +614,20 @@ class UnitTab(QWidget):
         if lc is not None and lc <= 0:
             errors.append("El largo carrozable debe ser mayor a 0.")
 
-        for r in range(self.tbl_points.rowCount()):
-            x = _try_float(_get_text(self.tbl_points, r, 1))
-            p = _try_float(_get_text(self.tbl_points, r, 2))
-            if x is None or p is None:
-                errors.append(f"Puntuales fila {r+1}: complete x_mm y valor_kg.")
-
-        for r in range(self.tbl_dists.rowCount()):
-            x0 = _try_float(_get_text(self.tbl_dists, r, 1))
-            lq = _try_float(_get_text(self.tbl_dists, r, 2))
-            q = _try_float(_get_text(self.tbl_dists, r, 3))
-            if x0 is None or lq is None or q is None:
-                errors.append(f"Distribuidas fila {r+1}: complete x0_mm, Lq_mm y q_kg_per_mm.")
-
-        for r in range(self.tbl_moms.rowCount()):
-            x = _try_float(_get_text(self.tbl_moms, r, 1))
-            m = _try_float(_get_text(self.tbl_moms, r, 2))
-            if x is None or m is None:
-                errors.append(f"Momentos fila {r+1}: complete x_mm y M_kgmm.")
+        _points, _dists, _moms, load_errors = self._build_loads_from_table()
+        errors.extend(load_errors)
 
         return errors
 
-    def _set_item_editable(self, tbl: QTableWidget, r: int, c: int, editable: bool):
-        it = tbl.item(r, c)
+    def _set_item_editable(self, row: int, col: int, editable: bool):
+        it = self.tbl.item(row, col)
         if it is None:
-            was_blocked = tbl.blockSignals(True)
+            was_blocked = self.tbl.blockSignals(True)
             try:
-                _set_item(tbl, r, c, "")
+                _set_item(self.tbl, row, col, "")
             finally:
-                tbl.blockSignals(was_blocked)
-            it = tbl.item(r, c)
+                self.tbl.blockSignals(was_blocked)
+            it = self.tbl.item(row, col)
         if it is None:
             return
         flags = it.flags()
@@ -688,42 +636,92 @@ class UnitTab(QWidget):
         else:
             flags &= ~Qt.ItemIsEditable
         it.setFlags(flags)
-        self._style_table_item(tbl, r, c, editable=editable)
-
-    def _style_table_item(self, tbl: QTableWidget, r: int, c: int, *, editable: bool):
-        it = tbl.item(r, c)
-        if it is None:
-            return
         bg = TABLE_INPUT_BG if editable else TABLE_READONLY_BG
         it.setBackground(QBrush(QColor(bg)))
         it.setForeground(QBrush(QColor(TABLE_TEXT_COLOR)))
 
-    def _refresh_table_edit_locks(self, tbl: QTableWidget):
-        was_blocked = tbl.blockSignals(True)
+    def _type_combo(self, row: int) -> QComboBox:
+        cmb = self.tbl.cellWidget(row, self.COL_TYPE)
+        if not isinstance(cmb, QComboBox):
+            raise RuntimeError("Fila de cargas sin combo de tipo.")
+        return cmb
+
+    def _row_of_combo(self, combo: QComboBox) -> int:
+        for row in range(self.tbl.rowCount()):
+            if self.tbl.cellWidget(row, self.COL_TYPE) is combo:
+                return row
+        return -1
+
+    def _refresh_row_mode(self, row: int):
+        load_type = self._type_combo(row).currentText()
+        self._set_item_editable(row, self.COL_MAG, True)
+        self._set_item_editable(row, self.COL_POS, True)
+        editable_len = load_type == "Distribuida"
+        self._set_item_editable(row, self.COL_LEN, editable_len)
+        if not editable_len:
+            self.tbl.blockSignals(True)
+            _set_item(self.tbl, row, self.COL_LEN, "")
+            self.tbl.blockSignals(False)
+
+    def _on_type_changed(self, combo: QComboBox):
+        row = self._row_of_combo(combo)
+        if row < 0:
+            return
+        self._refresh_row_mode(row)
+
+    def _add_load_row(self, *, load_type: str = "Puntual"):
+        row = self.tbl.rowCount()
+        self.tbl.insertRow(row)
+        cmb = QComboBox()
+        cmb.addItems(self.LOAD_TYPES)
+        cmb.setCurrentText(load_type if load_type in self.LOAD_TYPES else "Puntual")
+        cmb.setStyleSheet(combo_cell_style(TABLE_INPUT_BG))
+        cmb.currentTextChanged.connect(lambda *_args, c=cmb: self._on_type_changed(c))
+        self.tbl.setCellWidget(row, self.COL_TYPE, cmb)
+        _set_item(self.tbl, row, self.COL_MAG, "")
+        _set_item(self.tbl, row, self.COL_POS, "")
+        _set_item(self.tbl, row, self.COL_LEN, "")
+        self._refresh_row_mode(row)
+        self.tbl.setCurrentCell(row, self.COL_MAG)
+
+    def _remove_selected_rows(self):
+        rows = sorted({idx.row() for idx in self.tbl.selectedIndexes()}, reverse=True)
+        for row in rows:
+            self.tbl.removeRow(row)
+
+    def _load_row_dicts(self) -> List[Dict[str, str]]:
+        rows: List[Dict[str, str]] = []
+        for row in range(self.tbl.rowCount()):
+            rows.append(
+                {
+                    "type": self._type_combo(row).currentText(),
+                    "magnitude": _get_text(self.tbl, row, self.COL_MAG),
+                    "position": _get_text(self.tbl, row, self.COL_POS),
+                    "length": _get_text(self.tbl, row, self.COL_LEN),
+                }
+            )
+        return rows
+
+    def _set_load_rows(self, rows: Any) -> None:
+        self.tbl.blockSignals(True)
         try:
-            for r in range(tbl.rowCount()):
-                self._set_item_editable(tbl, r, 0, False)
-                if tbl is self.tbl_points:
-                    has_x = _try_float(_get_text(tbl, r, 1)) is not None
-                    self._set_item_editable(tbl, r, 1, True)
-                    self._set_item_editable(tbl, r, 2, has_x)
-                elif tbl is self.tbl_dists:
-                    has_x0 = _try_float(_get_text(tbl, r, 1)) is not None
-                    has_lq = _try_float(_get_text(tbl, r, 2)) is not None
-                    self._set_item_editable(tbl, r, 1, True)
-                    self._set_item_editable(tbl, r, 2, has_x0)
-                    self._set_item_editable(tbl, r, 3, has_x0 and has_lq)
-                elif tbl is self.tbl_moms:
-                    has_x = _try_float(_get_text(tbl, r, 1)) is not None
-                    self._set_item_editable(tbl, r, 1, True)
-                    self._set_item_editable(tbl, r, 2, has_x)
+            self.tbl.setRowCount(0)
+            if not isinstance(rows, list):
+                return
+            for load in rows:
+                if not isinstance(load, dict):
+                    continue
+                self._add_load_row(load_type=str(load.get("type", "Puntual")))
+                row = self.tbl.rowCount() - 1
+                _set_item(self.tbl, row, self.COL_MAG, str(load.get("magnitude", "")))
+                _set_item(self.tbl, row, self.COL_POS, str(load.get("position", "")))
+                _set_item(self.tbl, row, self.COL_LEN, str(load.get("length", "")))
+                self._refresh_row_mode(row)
         finally:
-            tbl.blockSignals(was_blocked)
+            self.tbl.blockSignals(False)
 
     def reset_tab_inputs(self):
-        self.tbl_points.setRowCount(0)
-        self.tbl_dists.setRowCount(0)
-        self.tbl_moms.setRowCount(0)
+        self.tbl.setRowCount(0)
         if (not self.is_acoplado) and (not self.is_bitren):
             self.cmb_semi_tipo.setCurrentIndex(0)
         self._populate_configs()
@@ -765,6 +763,7 @@ class UnitTab(QWidget):
                     "3 ejes conv — Rt 22200",
                     "3 ejes neum — Rt 23475",
                     "1 + 2 ejes — Rd 9200 (offset 3075) + Rt 15800",
+                    "1 + 1 + 1 ejes — Rd 9200 (offset 2450) + Rt 18800",
                     "1 + 3 ejes — Rd 9200 (offset 3700) + Rt 22200",
                 ])
                 self.cmb_config.setCurrentIndex(0)
@@ -775,6 +774,7 @@ class UnitTab(QWidget):
                     "3 ejes conv — Rt 22200",
                     "3 ejes neum — Rt 23475",
                     "1 + 2 ejes — Rd 9200 (offset 3075) + Rt 15800",
+                    "1 + 1 + 1 ejes — Rd 9200 (offset 2450) + Rt 18800",
                 ])
                 self.cmb_config.setCurrentIndex(0)
 
@@ -810,9 +810,14 @@ class UnitTab(QWidget):
             self.R_front_or_kp.setValue(15000.0 if tipo == "Escalado" else 9000.0)
 
             if "1+2" in compact_cfg or "1+1+1" in compact_cfg:
-                self.Rd.setValue(9200.0)
-                self.dir_offset.setValue(3075.0)
-                self.Rt.setValue(15800.0)
+                if "1+1+1" in compact_cfg:
+                    self.Rd.setValue(9200.0)
+                    self.dir_offset.setValue(2450.0)
+                    self.Rt.setValue(18800.0)
+                else:
+                    self.Rd.setValue(9200.0)
+                    self.dir_offset.setValue(3075.0)
+                    self.Rt.setValue(15800.0)
             elif "1+3" in compact_cfg:
                 self.Rd.setValue(9200.0)
                 self.dir_offset.setValue(3700.0)
@@ -832,114 +837,74 @@ class UnitTab(QWidget):
 
         self._apply_motor_enablement()
 
-    # ---- helpers UI tablas
-    def _add_row(self, tbl: QTableWidget, values: List[str]):
-        r = tbl.rowCount()
-        tbl.insertRow(r)
-        for c, v in enumerate(values):
-            _set_item(tbl, r, c, v)
-        self._refresh_table_edit_locks(tbl)
-
-    def _remove_selected_rows(self, tbl: QTableWidget):
-        rows = sorted(set([i.row() for i in tbl.selectedItems()]), reverse=True)
-        for rr in rows:
-            tbl.removeRow(rr)
-        if tbl is self.tbl_dists:
-            for r in range(tbl.rowCount()):
-                _set_item(tbl, r, 0, f"q{r + 1}")
-        elif tbl is self.tbl_moms:
-            for r in range(tbl.rowCount()):
-                _set_item(tbl, r, 0, f"M{r + 1}")
-        self._refresh_table_edit_locks(tbl)
-
-    def _next_p_label(self) -> str:
-        used: set[int] = set()
-        for r in range(self.tbl_points.rowCount()):
-            idx = p_index(_get_text(self.tbl_points, r, 0).strip().upper())
-            if idx is not None:
-                used.add(idx)
-        k = next_free_p_index(used)
-        return f"P{k}"
-
-    def _add_point_row(self):
-        r = self.tbl_points.rowCount()
-        self.tbl_points.insertRow(r)
-        _set_item(self.tbl_points, r, 0, self._next_p_label())
-        _set_item(self.tbl_points, r, 1, "")
-        _set_item(self.tbl_points, r, 2, "")
-        self._refresh_table_edit_locks(self.tbl_points)
-
-    def _add_dist_row(self):
-        r = self.tbl_dists.rowCount()
-        self.tbl_dists.insertRow(r)
-        _set_item(self.tbl_dists, r, 0, f"q{r + 1}")
-        _set_item(self.tbl_dists, r, 1, "")
-        _set_item(self.tbl_dists, r, 2, "")
-        _set_item(self.tbl_dists, r, 3, "")
-        self._refresh_table_edit_locks(self.tbl_dists)
-
-    def _add_mom_row(self):
-        r = self.tbl_moms.rowCount()
-        self.tbl_moms.insertRow(r)
-        _set_item(self.tbl_moms, r, 0, f"M{r + 1}")
-        _set_item(self.tbl_moms, r, 1, "")
-        _set_item(self.tbl_moms, r, 2, "")
-        self._refresh_table_edit_locks(self.tbl_moms)
-
     # ---- parsing entradas
+    def _build_loads_from_table(self) -> Tuple[List[PointForce], List[DistUniform], List[PointMoment], List[str]]:
+        points: List[PointForce] = []
+        dists: List[DistUniform] = []
+        moms: List[PointMoment] = []
+        errors: List[str] = []
+        dist_rows: List[int] = []
+        dist_intervals: List[Tuple[float, float]] = []
+        Lc = _spin_value_or_none(self.Lc)
+        beam_L = float(Lc) if Lc is not None else None
+        p_count = 0
+        d_count = 0
+        m_count = 0
+
+        for row in range(self.tbl.rowCount()):
+            load_type = self._type_combo(row).currentText()
+            mag = _try_float(_get_text(self.tbl, row, self.COL_MAG))
+            pos = _try_float(_get_text(self.tbl, row, self.COL_POS))
+            length = _try_float(_get_text(self.tbl, row, self.COL_LEN))
+
+            if mag is None or pos is None:
+                errors.append(f"Cargas fila {row + 1}: complete magnitud y posición.")
+                continue
+            if beam_L is not None and not (0.0 <= float(pos) <= beam_L):
+                errors.append(f"Cargas fila {row + 1}: la posición debe estar dentro de [0, L].")
+                continue
+
+            if load_type == "Puntual":
+                p_count += 1
+                points.append(PointForce(label=f"P{p_count}", x_mm=float(pos), value_user=float(mag)))
+            elif load_type == "Momento":
+                m_count += 1
+                moms.append(PointMoment(label=f"M{m_count}", x_mm=float(pos), M_user_kgmm=float(mag)))
+            elif load_type == "Distribuida":
+                if length is None or length <= 0.0:
+                    errors.append(f"Cargas fila {row + 1}: la distribuida requiere longitud > 0.")
+                    continue
+                try:
+                    x1, x2 = dist_interval(float(pos), float(length))
+                except Exception as exc:
+                    errors.append(f"Cargas fila {row + 1}: {exc}")
+                    continue
+                if beam_L is not None and (x1 < 0.0 or x2 > beam_L):
+                    errors.append(f"Cargas fila {row + 1}: el tramo distribuido debe quedar dentro de [0, L].")
+                    continue
+                d_count += 1
+                dist_rows.append(row)
+                dist_intervals.append((x1, x2))
+                dists.append(DistUniform(label=f"q{d_count}", x0_mm=x1, Lq_mm=float(length), q_user=float(mag) / float(length)))
+
+        ok, pairs = check_no_overlap(dist_intervals)
+        if not ok:
+            for idx_i, idx_j in pairs:
+                r1 = dist_rows[idx_i] + 1 if idx_i < len(dist_rows) else "?"
+                r2 = dist_rows[idx_j] + 1 if idx_j < len(dist_rows) else "?"
+                errors.append(f"Cargas distribuidas solapadas entre filas {r1} y {r2}.")
+
+        return points, dists, moms, errors
+
     def parse_inputs(self) -> Tuple[Beam, List[PointForce], List[DistUniform], List[PointMoment], List[str]]:
         notes: List[str] = []
         Lc = _spin_value_or_none(self.Lc)
         if Lc is None:
             raise ValueError("VALIDACION: complete 'Largo carrozable [mm]'.")
         beam = Beam(L_mm=Lc)
-
-        # Puntuales
-        raw: List[Tuple[str, float, float]] = []
-        used_idx: set[int] = set()
-        for r in range(self.tbl_points.rowCount()):
-            label = _get_text(self.tbl_points, r, 0).strip() or "P"
-            x = _try_float(_get_text(self.tbl_points, r, 1))
-            v = _try_float(_get_text(self.tbl_points, r, 2))
-            if x is None or v is None:
-                continue
-            if _is_reaction_label(label):
-                notes.append(f'Se ignoró "{label}" en puntuales (reacciones van en motor).')
-                continue
-            idx = p_index(label.upper())
-            if idx is not None:
-                used_idx.add(idx)
-            raw.append((label, x, v))
-
-        points: List[PointForce] = []
-        for label, x, v in raw:
-            if label.strip().upper() == "P":
-                k = next_free_p_index(used_idx)
-                used_idx.add(k)
-                label = f"P{k}"
-            points.append(PointForce(label=label, x_mm=x, value_user=v))
-
-        # Distribuidas
-        dists: List[DistUniform] = []
-        for r in range(self.tbl_dists.rowCount()):
-            label = (_get_text(self.tbl_dists, r, 0) or "q").strip()
-            x0 = _try_float(_get_text(self.tbl_dists, r, 1))
-            Lq = _try_float(_get_text(self.tbl_dists, r, 2))
-            q = _try_float(_get_text(self.tbl_dists, r, 3))
-            if x0 is None or Lq is None or q is None:
-                continue
-            dists.append(DistUniform(label=label, x0_mm=x0, Lq_mm=Lq, q_user=q))
-
-        # Momentos
-        moms: List[PointMoment] = []
-        for r in range(self.tbl_moms.rowCount()):
-            label = (_get_text(self.tbl_moms, r, 0) or "M").strip()
-            x = _try_float(_get_text(self.tbl_moms, r, 1))
-            m = _try_float(_get_text(self.tbl_moms, r, 2))
-            if x is None or m is None:
-                continue
-            moms.append(PointMoment(label=label, x_mm=x, M_user_kgmm=m))
-
+        points, dists, moms, load_errors = self._build_loads_from_table()
+        if load_errors:
+            notes.extend(load_errors)
         return beam, points, dists, moms, notes
 
     def set_cache(self, cache: Optional[SessionCache]):
@@ -1003,11 +968,37 @@ class UnitTab(QWidget):
         self.set_deflection_summary(text, ok=None)
 
     def export_state(self) -> Dict[str, Any]:
-        def _table_rows(tbl: QTableWidget) -> List[List[str]]:
-            rows: List[List[str]] = []
-            for r in range(tbl.rowCount()):
-                rows.append([_get_text(tbl, r, c) for c in range(tbl.columnCount())])
-            return rows
+        load_rows = self._load_row_dicts()
+
+        legacy_points: List[List[str]] = []
+        legacy_dists: List[List[str]] = []
+        legacy_moms: List[List[str]] = []
+        p_count = 0
+        q_count = 0
+        m_count = 0
+        for load in load_rows:
+            load_type = load.get("type", "Puntual")
+            mag = load.get("magnitude", "")
+            pos = load.get("position", "")
+            length = load.get("length", "")
+            if load_type == "Puntual":
+                p_count += 1
+                legacy_points.append([f"P{p_count}", pos, mag])
+            elif load_type == "Distribuida":
+                q_count += 1
+                total = _try_float(mag)
+                Lq = _try_float(length)
+                center = _try_float(pos)
+                q_text = ""
+                x0_text = pos
+                if total is not None and Lq is not None and Lq > 0.0:
+                    q_text = _fmt_plain(float(total) / float(Lq), 6)
+                if center is not None and Lq is not None:
+                    x0_text = _fmt_plain(float(center) - (float(Lq) / 2.0), 2)
+                legacy_dists.append([f"q{q_count}", x0_text, length, q_text])
+            elif load_type == "Momento":
+                m_count += 1
+                legacy_moms.append([f"M{m_count}", pos, mag])
 
         return {
             "semi_tipo": self.cmb_semi_tipo.currentText() if hasattr(self, "cmb_semi_tipo") else None,
@@ -1025,9 +1016,10 @@ class UnitTab(QWidget):
             "show_deflection": bool(self.chk_show_deflection.isChecked()),
             "axis_lift_enabled": self.axis_lift_enabled(),
             "view_mode": self.view_mode(),
-            "tbl_points": _table_rows(self.tbl_points),
-            "tbl_dists": _table_rows(self.tbl_dists),
-            "tbl_moms": _table_rows(self.tbl_moms),
+            "loads": load_rows,
+            "tbl_points": legacy_points,
+            "tbl_dists": legacy_dists,
+            "tbl_moms": legacy_moms,
             "section_panel": self.section_panel.export_state(),
         }
 
@@ -1061,21 +1053,46 @@ class UnitTab(QWidget):
             except Exception:
                 pass
 
-        def _fill_table(tbl: QTableWidget, rows: Any) -> None:
-            tbl.blockSignals(True)
-            try:
-                tbl.setRowCount(0)
-                if not isinstance(rows, list):
-                    return
-                for row_values in rows:
-                    values = [str(v) for v in row_values] if isinstance(row_values, list) else []
-                    r = tbl.rowCount()
-                    tbl.insertRow(r)
-                    for c in range(tbl.columnCount()):
-                        _set_item(tbl, r, c, values[c] if c < len(values) else "")
-            finally:
-                tbl.blockSignals(False)
-            self._refresh_table_edit_locks(tbl)
+        def _legacy_load_rows(state_in: Dict[str, Any]) -> List[Dict[str, str]]:
+            rows: List[Dict[str, str]] = []
+            for values in state_in.get("tbl_points") or []:
+                if not isinstance(values, list):
+                    continue
+                rows.append({
+                    "type": "Puntual",
+                    "magnitude": str(values[2]) if len(values) > 2 else "",
+                    "position": str(values[1]) if len(values) > 1 else "",
+                    "length": "",
+                })
+            for values in state_in.get("tbl_dists") or []:
+                if not isinstance(values, list):
+                    continue
+                x0 = _try_float(str(values[1])) if len(values) > 1 else None
+                Lq = _try_float(str(values[2])) if len(values) > 2 else None
+                q = _try_float(str(values[3])) if len(values) > 3 else None
+                position = str(values[1]) if len(values) > 1 else ""
+                magnitude = str(values[3]) if len(values) > 3 else ""
+                length = str(values[2]) if len(values) > 2 else ""
+                if x0 is not None and Lq is not None:
+                    position = _fmt_plain(float(x0) + (float(Lq) / 2.0), 2)
+                if q is not None and Lq is not None:
+                    magnitude = _fmt_plain(float(q) * float(Lq), 2)
+                rows.append({
+                    "type": "Distribuida",
+                    "magnitude": magnitude,
+                    "position": position,
+                    "length": length,
+                })
+            for values in state_in.get("tbl_moms") or []:
+                if not isinstance(values, list):
+                    continue
+                rows.append({
+                    "type": "Momento",
+                    "magnitude": str(values[2]) if len(values) > 2 else "",
+                    "position": str(values[1]) if len(values) > 1 else "",
+                    "length": "",
+                })
+            return rows
 
         semi_tipo = state.get("semi_tipo")
         if hasattr(self, "cmb_semi_tipo") and semi_tipo is not None:
@@ -1100,9 +1117,8 @@ class UnitTab(QWidget):
 
         self.chk_show_deflection.setChecked(bool(state.get("show_deflection", True)))
         self.chk_axis_lift.setChecked(bool(state.get("axis_lift_enabled", False)) and self.chk_axis_lift.isEnabled())
-        _fill_table(self.tbl_points, state.get("tbl_points"))
-        _fill_table(self.tbl_dists, state.get("tbl_dists"))
-        _fill_table(self.tbl_moms, state.get("tbl_moms"))
+        loads = state.get("loads")
+        self._set_load_rows(loads if isinstance(loads, list) else _legacy_load_rows(state))
         self.section_panel.import_state(state.get("section_panel"))
         self.set_view_mode(str(state.get("view_mode", "inputs")))
         self.set_cache(None)
@@ -1153,13 +1169,8 @@ class FBDApp(QMainWindow):
         self.tabs.addTab(self.tab_reactions, "Cálculo y verificación")
 
         left_lay.addWidget(self.tabs)
-
-        left_scroll = QScrollArea()
-        left_scroll.setWidgetResizable(True)
-        left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        left_scroll.setWidget(left_host)
-        left_scroll.setMinimumWidth(380)
-        splitter.addWidget(left_scroll)
+        left_host.setMinimumWidth(380)
+        splitter.addWidget(left_host)
 
         # RIGHT plots
         right_container = QWidget()
@@ -1230,9 +1241,7 @@ class FBDApp(QMainWindow):
             if hasattr(tab, "cmb_semi_tipo"):
                 tab.cmb_semi_tipo.currentIndexChanged.connect(lambda *_, t=tab: self._schedule_replot_tab(t, reset_solution=True))
 
-            tab.tbl_points.cellChanged.connect(lambda *_, t=tab: self._schedule_replot_tab(t, reset_solution=True))
-            tab.tbl_dists.cellChanged.connect(lambda *_, t=tab: self._schedule_replot_tab(t, reset_solution=True))
-            tab.tbl_moms.cellChanged.connect(lambda *_, t=tab: self._schedule_replot_tab(t, reset_solution=True))
+            tab.tbl.cellChanged.connect(lambda *_, t=tab: self._schedule_replot_tab(t, reset_solution=True))
             tab.chk_axis_lift.toggled.connect(lambda *_, t=tab: self._schedule_axis_lift_replot(t))
             tab.chk_show_deflection.toggled.connect(lambda *_, t=tab: self._schedule_replot_tab(t, reset_solution=False))
             tab.section_panel.inertia_inputs_changed.connect(lambda t=tab: self._schedule_replot_tab(t, reset_solution=False))

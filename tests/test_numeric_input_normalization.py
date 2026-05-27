@@ -112,10 +112,10 @@ def test_main_load_tables_accept_comma_decimal_inputs():
     _app()
     tab = UnitTab("Test")
     tab.Lc.setValue(10000.0)
-    tab.tbl_points.setRowCount(0)
-    tab._add_point_row()
-    tab.tbl_points.item(0, 1).setText("1000,5")
-    tab.tbl_points.item(0, 2).setText("500,25")
+    tab.tbl.setRowCount(0)
+    tab._add_load_row(load_type="Puntual")
+    tab.tbl.item(0, tab.COL_POS).setText("1000,5")
+    tab.tbl.item(0, tab.COL_MAG).setText("500,25")
 
     beam, points, dists, moms, notes = tab.parse_inputs()
 

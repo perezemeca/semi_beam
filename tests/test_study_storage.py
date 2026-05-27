@@ -5,8 +5,9 @@ from types import SimpleNamespace
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from docx import Document
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QGroupBox, QLabel, QScrollArea, QTableWidget, QToolButton
 
+from semi_beam.domain.loads import DistUniform, PointForce, PointMoment
 from semi_beam.sections.i_section import ISection
 from semi_beam.services.study_storage import load_study_file, save_study_file
 from semi_beam.ui.main_window import FBDApp
@@ -264,9 +265,9 @@ def test_study_file_roundtrip_restores_ui_state(tmp_path):
     semi.R_front_or_kp.setValue(9400.0)
     semi.Rt.setValue(22200.0)
     semi.chk_show_deflection.setChecked(False)
-    semi._add_point_row()
-    semi.tbl_points.item(0, 1).setText("2500")
-    semi.tbl_points.item(0, 2).setText("5000")
+    semi._add_load_row(load_type="Puntual")
+    semi.tbl.item(0, semi.COL_MAG).setText("5000")
+    semi.tbl.item(0, semi.COL_POS).setText("2500")
     semi.section_panel.cmb_t_top.setCurrentIndex(semi.section_panel.cmb_t_top.findData("7/16"))
     semi.section_panel.chk_bastidor_lateral.setChecked(True)
     semi.section_panel.n_bastidor_lateral_altura.setValue(150.0)
@@ -302,8 +303,9 @@ def test_study_file_roundtrip_restores_ui_state(tmp_path):
     assert restored_semi.Lc.value() == 13600.0
     assert restored_semi.x_front_or_kp.value() == 1250.0
     assert restored_semi.chk_show_deflection.isChecked() is False
-    assert restored_semi.tbl_points.item(0, 1).text() == "2500"
-    assert restored_semi.tbl_points.item(0, 2).text() == "5000"
+    assert restored_semi._type_combo(0).currentText() == "Puntual"
+    assert restored_semi.tbl.item(0, restored_semi.COL_POS).text() == "2500"
+    assert restored_semi.tbl.item(0, restored_semi.COL_MAG).text() == "5000"
     assert restored_semi.section_panel.cmb_t_top.currentData() == "7/16"
     assert restored_semi.section_panel.chk_bastidor_lateral.isChecked() is True
     assert restored_semi.section_panel.chk_bastidor_lateral_structural.isChecked() is True
@@ -370,9 +372,9 @@ def _configure_solvable_new_study(window: FBDApp):
     tab.R_front_or_kp.setValue(9400.0)
     tab.Rt.setValue(22200.0)
     tab.chk_show_deflection.setChecked(False)
-    tab._add_point_row()
-    tab.tbl_points.item(0, 1).setText("2500")
-    tab.tbl_points.item(0, 2).setText("5000")
+    tab._add_load_row(load_type="Puntual")
+    tab.tbl.item(0, tab.COL_MAG).setText("5000")
+    tab.tbl.item(0, tab.COL_POS).setText("2500")
     return tab
 
 
@@ -380,6 +382,77 @@ def _point_by_label(points, label: str):
     matches = [p for p in points if p.label == label]
     assert len(matches) == 1
     return matches[0]
+
+
+def test_unit_tab_single_load_table_parses_all_load_types():
+    _app()
+    window = FBDApp()
+    tab = window.tab_semi
+    tab.Lc.setValue(12000.0)
+    tab.tbl.setRowCount(0)
+
+    tab._add_load_row(load_type="Puntual")
+    tab.tbl.item(0, tab.COL_MAG).setText("500")
+    tab.tbl.item(0, tab.COL_POS).setText("1000")
+
+    tab._add_load_row(load_type="Distribuida")
+    tab.tbl.item(1, tab.COL_MAG).setText("1200")
+    tab.tbl.item(1, tab.COL_POS).setText("4000")
+    tab.tbl.item(1, tab.COL_LEN).setText("600")
+
+    tab._add_load_row(load_type="Momento")
+    tab.tbl.item(2, tab.COL_MAG).setText("25000")
+    tab.tbl.item(2, tab.COL_POS).setText("7000")
+
+    _beam, points, dists, moms, notes = tab.parse_inputs()
+
+    assert notes == []
+    assert len(points) == 1
+    assert isinstance(points[0], PointForce)
+    assert points[0].label == "P1"
+    assert points[0].value_user == 500.0
+    assert points[0].x_mm == 1000.0
+    assert len(dists) == 1
+    assert isinstance(dists[0], DistUniform)
+    assert dists[0].label == "q1"
+    assert dists[0].x0_mm == 3700.0
+    assert dists[0].Lq_mm == 600.0
+    assert dists[0].q_user == 2.0
+    assert len(moms) == 1
+    assert isinstance(moms[0], PointMoment)
+    assert moms[0].label == "M1"
+    assert moms[0].M_user_kgmm == 25000.0
+    assert moms[0].x_mm == 7000.0
+    window.close()
+
+
+def test_unit_tab_imports_legacy_split_load_tables_into_single_load_table():
+    _app()
+    window = FBDApp()
+    tab = window.tab_semi
+    legacy_state = tab.export_state()
+    legacy_state.pop("loads", None)
+    legacy_state["tbl_points"] = [["P1", "1000", "500"]]
+    legacy_state["tbl_dists"] = [["q1", "3700", "600", "2"]]
+    legacy_state["tbl_moms"] = [["M1", "7000", "25000"]]
+
+    restored = FBDApp()
+    restored.tab_semi.import_state(legacy_state)
+    restored_tab = restored.tab_semi
+
+    assert restored_tab.tbl.rowCount() == 3
+    assert restored_tab._type_combo(0).currentText() == "Puntual"
+    assert restored_tab.tbl.item(0, restored_tab.COL_MAG).text() == "500"
+    assert restored_tab.tbl.item(0, restored_tab.COL_POS).text() == "1000"
+    assert restored_tab._type_combo(1).currentText() == "Distribuida"
+    assert restored_tab.tbl.item(1, restored_tab.COL_MAG).text() == "1200"
+    assert restored_tab.tbl.item(1, restored_tab.COL_POS).text() == "4000"
+    assert restored_tab.tbl.item(1, restored_tab.COL_LEN).text() == "600"
+    assert restored_tab._type_combo(2).currentText() == "Momento"
+    assert restored_tab.tbl.item(2, restored_tab.COL_MAG).text() == "25000"
+    assert restored_tab.tbl.item(2, restored_tab.COL_POS).text() == "7000"
+    window.close()
+    restored.close()
 
 
 def test_axis_lift_adds_single_first_axle_load_without_moving_tandem():
@@ -462,14 +535,130 @@ def test_axis_lift_treats_1_1_1_as_directional_lift():
     _app()
     window = FBDApp()
     tab = window.tab_semi
-    tab.cmb_config.addItem("1 + 1 + 1 ejes — Rd 9200 (offset 3075) + Rt 15800")
-    tab.cmb_config.setCurrentText("1 + 1 + 1 ejes — Rd 9200 (offset 3075) + Rt 15800")
+    tab.cmb_config.setCurrentText("1 + 1 + 1 ejes — Rd 9200 (offset 2450) + Rt 18800")
     tab._apply_config_defaults()
 
     assert tab.chk_axis_lift.isEnabled() is True
     assert "Levantar direccional" in tab.chk_axis_lift.text()
     assert tab.Rd.value() == 9200.0
-    assert tab.dir_offset.value() == 3075.0
+    assert tab.Rt.value() == 18800.0
+    assert tab.Rd.value() + tab.Rt.value() == 28000.0
+    assert tab.dir_offset.value() == 2450.0
+    window.close()
+
+
+def test_semi_1_1_1_solves_with_directional_lift_and_fixed_tandem():
+    _app()
+    window = FBDApp()
+    tab = _configure_solvable_new_study(window)
+    tab.cmb_config.setCurrentText("1 + 1 + 1 ejes — Rd 9200 (offset 2450) + Rt 18800")
+    tab._apply_config_defaults()
+
+    window._solve_for_tab(tab)
+    base_cache = tab.get_cache()
+    assert base_cache is not None
+    base_rt = _point_by_label(base_cache.points, "Rt")
+
+    tab.chk_axis_lift.setChecked(True)
+    window._replot_active_tab()
+    lifted_cache = tab.get_cache()
+    assert lifted_cache is not None
+    lifted_rt = _point_by_label(lifted_cache.points, "Rt")
+    lift_load = _point_by_label(lifted_cache.points, "P_levante_direccional")
+
+    assert tab.Rd.value() + tab.Rt.value() == 28000.0
+    assert tab.dir_offset.value() == 2450.0
+    assert lift_load.value_user == 1300.0
+    assert lift_load.x_mm == lifted_rt.x_mm - 2450.0
+    assert lifted_rt.x_mm == base_rt.x_mm
+    assert lifted_rt.value_user != base_rt.value_user
+    assert abs(float(tab.get_diag().eval_V(lifted_cache.beam_plot.L_mm))) < 1e-6
+    assert abs(float(tab.get_diag().eval_M(lifted_cache.beam_plot.L_mm))) < 1e-3
+    window.close()
+
+
+def test_unit_tabs_have_unified_load_add_controls_and_fixed_tab_bar():
+    _app()
+    window = FBDApp()
+
+    assert isinstance(window.tab_acoplado.content_scroll, QScrollArea)
+    assert isinstance(window.tab_semi.content_scroll, QScrollArea)
+    assert isinstance(window.tab_bitren.content_scroll, QScrollArea)
+    assert isinstance(window.tab_reactions.content_scroll, QScrollArea)
+    assert not isinstance(window.tabs.parentWidget(), QScrollArea)
+
+    for tab in (window.tab_acoplado, window.tab_semi, window.tab_bitren):
+        groups = [group for group in tab.findChildren(QGroupBox) if group.title() == "Cargas"]
+        assert len(groups) == 1
+        assert tab.btn_add_load.text() == "Agregar carga"
+        assert tab.btn_del_load.text() == "Eliminar seleccionadas"
+        assert not hasattr(tab, "cmb_add_load_type")
+        assert not hasattr(tab, "btn_add_p")
+        assert not hasattr(tab, "btn_add_q")
+        assert not hasattr(tab, "btn_add_m")
+        assert not hasattr(tab, "tbl_points")
+        assert not hasattr(tab, "tbl_dists")
+        assert not hasattr(tab, "tbl_moms")
+
+        headers = [
+            tab.tbl.horizontalHeaderItem(col).text()
+            for col in range(tab.tbl.columnCount())
+        ]
+        assert headers == ["Tipo", "Magnitud", "Posición / centro [mm]", "Longitud [mm]"]
+
+        for load_type in ("Puntual", "Distribuida", "Momento"):
+            before = tab.tbl.rowCount()
+            tab._add_load_row(load_type=load_type)
+            assert tab.tbl.rowCount() == before + 1
+            assert tab._type_combo(before).currentText() == load_type
+
+    assert window.tab_reactions.btn_add.text() == "Agregar carga"
+    window.close()
+
+
+def test_unit_tabs_render_single_general_load_table_without_old_collapsibles():
+    app = _app()
+    window = FBDApp()
+    window.resize(1400, 900)
+    window.show()
+    app.processEvents()
+
+    forbidden_sections = {
+        "Fuerzas puntuales conocidas (P1, P2, ...)",
+        "Cargas distribuidas conocidas (kg/mm)",
+        "Momentos puntuales (kg·mm, CCW+)",
+    }
+    general_headers = ("Tipo", "Magnitud", "Posición / centro [mm]", "Longitud [mm]")
+
+    for tab in (window.tab_acoplado, window.tab_semi, window.tab_bitren):
+        window.tabs.setCurrentWidget(tab)
+        app.processEvents()
+
+        visible_labels = {label.text() for label in tab.findChildren(QLabel) if label.isVisible()}
+        visible_sections = {button.text() for button in tab.findChildren(QToolButton) if button.isVisible()}
+        assert "Magnitud: kg para puntuales y distribuidas (P total), kg·mm para momentos." in visible_labels
+        assert visible_sections.isdisjoint(forbidden_sections)
+
+        load_groups = [
+            group for group in tab.findChildren(QGroupBox)
+            if group.isVisible() and group.title() == "Cargas"
+        ]
+        assert len(load_groups) == 1
+
+        visible_headers = []
+        for table in tab.findChildren(QTableWidget):
+            if not table.isVisible():
+                continue
+            visible_headers.append(tuple(
+                table.horizontalHeaderItem(col).text()
+                for col in range(table.columnCount())
+            ))
+
+        assert visible_headers.count(general_headers) == 1
+        assert ("label", "x_mm", "valor_kg") not in visible_headers
+        assert ("label", "x0_mm", "Lq_mm", "q_kg_per_mm") not in visible_headers
+        assert ("label", "x_mm", "M_kgmm") not in visible_headers
+
     window.close()
 
 
