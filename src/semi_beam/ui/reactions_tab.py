@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QProgressBar,
+    QScrollArea,
     QSlider,
     QTableWidget,
     QTableWidgetItem,
@@ -205,7 +206,17 @@ class SemiTrailerReactionsTab(QWidget):
         self._search_worker: Optional[_SearchWorker] = None
         self._all_boxes: List[CollapsibleBox] = []
 
-        root = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        self.content_scroll = QScrollArea()
+        self.content_scroll.setWidgetResizable(True)
+        self.content_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        outer.addWidget(self.content_scroll)
+
+        content = QWidget()
+        self.content_scroll.setWidget(content)
+        root = QVBoxLayout(content)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(10)
 
@@ -290,8 +301,9 @@ class SemiTrailerReactionsTab(QWidget):
 
         root.addWidget(geo_box)
 
-        load_box = QGroupBox("Cargas")
-        load_lay = QVBoxLayout(load_box)
+        load_box = CollapsibleBox("Cargas")
+        self._all_boxes.append(load_box)
+        load_lay = load_box.content_layout()
         load_lay.addWidget(QLabel("Magnitud: kg para puntuales y distribuidas (P total), kg·mm para momentos."))
         self.tbl = QTableWidget(0, 4)
         self.tbl.setHorizontalHeaderLabels(["Tipo", "Magnitud", "Posición / centro [mm]", "Longitud [mm]"])
@@ -334,9 +346,6 @@ class SemiTrailerReactionsTab(QWidget):
         result_lay.addWidget(self.chk_show_vm)
         root.addWidget(result_box)
 
-        defl_box = QGroupBox("Deformada")
-        defl_lay = QVBoxLayout(defl_box)
-        defl_form = QFormLayout()
         self.chk_show_deflection = QCheckBox("Mostrar deformada")
         self.chk_show_deflection.setChecked(True)
         self.lbl_defl_e = QLabel("21000 kg/mm²")
@@ -344,11 +353,6 @@ class SemiTrailerReactionsTab(QWidget):
         self.lbl_deflection = QLabel("Convexidad L/2: +30 mm\nvmin total: -\nUtilizado: - / 60 mm\nEstado: -")
         self.lbl_deflection.setWordWrap(True)
         self.lbl_deflection.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
-        defl_form.addRow(self.chk_show_deflection)
-        defl_form.addRow("E [kg/mm²]:", self.lbl_defl_e)
-        defl_lay.addLayout(defl_form)
-        defl_lay.addWidget(self.lbl_deflection)
-        root.addWidget(defl_box)
 
         search_box = QGroupBox("Búsqueda")
         search_lay = QVBoxLayout(search_box)
@@ -394,7 +398,6 @@ class SemiTrailerReactionsTab(QWidget):
         self.offset.valueChanged.connect(self._sync_offset_slider)
         self.offset_slider.valueChanged.connect(self._sync_offset_spin)
         self.chk_show_vm.toggled.connect(lambda *_: self.plot_data_changed.emit())
-        self.chk_show_deflection.toggled.connect(lambda *_: self.plot_data_changed.emit())
         for sp in (
             self.L, self.x_a, self.x_b, self.x_k, self.x_t, self.x_t_min, self.x_t_max,
             self.limit_ra, self.limit_rb, self.limit_rk, self.limit_rd, self.limit_rt,
@@ -431,7 +434,8 @@ class SemiTrailerReactionsTab(QWidget):
         return self._plot_state
 
     def deflection_enabled(self) -> bool:
-        return bool(self.chk_show_deflection.isChecked())
+        self.chk_show_deflection.setChecked(True)
+        return True
 
     def deflection_params(self) -> Optional[float]:
         return 2.1e4
@@ -505,7 +509,7 @@ class SemiTrailerReactionsTab(QWidget):
             "limit_rd": float(self.limit_rd.value()),
             "limit_rt": float(self.limit_rt.value()),
             "show_vm": bool(self.chk_show_vm.isChecked()),
-            "show_deflection": bool(self.chk_show_deflection.isChecked()),
+            "show_deflection": True,
             "loads": loads,
             "section_panel": self.section_panel.export_state(),
         }
@@ -550,7 +554,7 @@ class SemiTrailerReactionsTab(QWidget):
                 _set_spin(sp, key)
 
             self.chk_show_vm.setChecked(bool(state.get("show_vm", True)))
-            self.chk_show_deflection.setChecked(bool(state.get("show_deflection", True)))
+            self.chk_show_deflection.setChecked(True)
 
             self.tbl.setRowCount(0)
             loads = state.get("loads")

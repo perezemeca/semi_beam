@@ -5,12 +5,16 @@ from types import SimpleNamespace
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from docx import Document
-from PySide6.QtWidgets import QApplication, QGroupBox, QLabel, QScrollArea, QTableWidget, QToolButton
+from PySide6.QtWidgets import QApplication, QLabel, QMessageBox, QPushButton, QScrollArea, QTableWidget, QToolButton
 
 from semi_beam.domain.loads import DistUniform, PointForce, PointMoment
 from semi_beam.sections.i_section import ISection
 from semi_beam.services.study_storage import load_study_file, save_study_file
-from semi_beam.ui.main_window import FBDApp
+from semi_beam.ui.main_window import (
+    DIRECTIONAL_OFFSET_MAX_MM,
+    DIRECTIONAL_OFFSET_MIN_MM,
+    FBDApp,
+)
 from semi_beam.ui.section_check_panel import SectionCheckPanel
 
 
@@ -35,6 +39,7 @@ def test_section_panel_exposes_new_thickness_options():
     assert panel.chk_bastidor_lateral.text() == "Agregar bastidor lateral"
     assert panel.chk_bastidor_lateral.isChecked() is False
     assert panel.chk_bastidor_lateral_structural.isChecked() is True
+    assert panel.chk_bastidor_lateral_structural.isVisible() is False
     assert panel.n_bastidor_lateral_altura.minimum() == 130.0
     assert panel.n_bastidor_lateral_altura.maximum() == 170.0
     assert panel.n_bastidor_lateral_altura.value() == 170.0
@@ -52,7 +57,7 @@ def test_section_panel_exposes_new_thickness_options():
     assert {6.35, 7.9375, 9.525}.issubset(chapon_options)
 
 
-def test_section_panel_adds_lateral_frame_only_when_structural():
+def test_section_panel_lateral_frame_is_always_structural():
     _app()
     panel = SectionCheckPanel()
     panel.set_moment_provider(lambda _x_mm: 125000.0)
@@ -64,15 +69,10 @@ def test_section_panel_adds_lateral_frame_only_when_structural():
     panel.chk_bastidor_lateral.setChecked(True)
     panel.chk_bastidor_lateral_structural.setChecked(False)
     panel._recompute_all()
-    non_structural_jx = float(panel.tbl.item(0, panel.COL_JX).text())
+    legacy_false_jx = float(panel.tbl.item(0, panel.COL_JX).text())
 
-    panel.chk_bastidor_lateral_structural.setChecked(True)
-    panel.n_bastidor_lateral_altura.setValue(150.0)
-    panel._recompute_all()
-    structural_jx = float(panel.tbl.item(0, panel.COL_JX).text())
-
-    assert non_structural_jx == base_jx
-    assert structural_jx > base_jx
+    assert panel.chk_bastidor_lateral_structural.isChecked() is True
+    assert legacy_false_jx > base_jx
 
 
 def test_section_panel_floor_included_always_contributes_and_width_changes_properties():
@@ -302,7 +302,8 @@ def test_study_file_roundtrip_restores_ui_state(tmp_path):
     assert restored_semi.cmb_config.currentText() == semi.cmb_config.currentText()
     assert restored_semi.Lc.value() == 13600.0
     assert restored_semi.x_front_or_kp.value() == 1250.0
-    assert restored_semi.chk_show_deflection.isChecked() is False
+    assert restored_semi.chk_show_deflection.isChecked() is True
+    assert restored_semi.deflection_enabled() is True
     assert restored_semi._type_combo(0).currentText() == "Puntual"
     assert restored_semi.tbl.item(0, restored_semi.COL_POS).text() == "2500"
     assert restored_semi.tbl.item(0, restored_semi.COL_MAG).text() == "5000"
@@ -362,6 +363,20 @@ def test_section_panel_import_old_state_uses_default_chapon_length():
     assert panel.n_chapon_length.value() == 2000.0
     state = panel.export_state()
     assert state["chapon_length_mm"] == 2000.0
+
+
+def test_section_panel_import_old_lateral_frame_false_structural_forces_true():
+    _app()
+    panel = SectionCheckPanel()
+    panel.import_state({
+        "include_bastidor_lateral": True,
+        "bastidor_lateral_structural": False,
+        "bastidor_lateral_height_mm": 150.0,
+    })
+
+    assert panel.chk_bastidor_lateral.isChecked() is True
+    assert panel.chk_bastidor_lateral_structural.isChecked() is True
+    assert panel.export_state()["bastidor_lateral_structural"] is True
 
 
 def _configure_solvable_new_study(window: FBDApp):
@@ -524,7 +539,8 @@ def test_axis_lift_directional_load_uses_directional_position():
     lift_load = _point_by_label(cache.points, "P_levante_direccional")
     assert "Levantar direccional" in tab.chk_axis_lift.text()
     assert lift_load.value_user == 1300.0
-    assert lift_load.x_mm == rt.x_mm - tab.dir_offset.value()
+    assert tab.directional_offset_for_solver() == tab.dir_offset.value() + 625.0
+    assert lift_load.x_mm == rt.x_mm - tab.directional_offset_for_solver()
     assert [p for p in cache.points if p.label == "Rd"] == []
     assert abs(float(tab.get_diag().eval_V(cache.beam_plot.L_mm))) < 1e-6
     assert abs(float(tab.get_diag().eval_M(cache.beam_plot.L_mm))) < 1e-3
@@ -544,6 +560,31 @@ def test_axis_lift_treats_1_1_1_as_directional_lift():
     assert tab.Rt.value() == 18800.0
     assert tab.Rd.value() + tab.Rt.value() == 28000.0
     assert tab.dir_offset.value() == 2450.0
+    window.close()
+
+
+def test_directional_offset_is_entered_from_second_axis_and_validated():
+    _app()
+    window = FBDApp()
+    tab = _configure_solvable_new_study(window)
+    tab.cmb_config.setCurrentText("1 + 2 ejes — Rd 9200 (offset 3075) + Rt 15800")
+    tab._apply_config_defaults()
+
+    assert tab.dir_offset.minimum() == DIRECTIONAL_OFFSET_MIN_MM
+    assert tab.dir_offset.maximum() == DIRECTIONAL_OFFSET_MAX_MM
+    assert "segundo eje" in tab.dir_offset.toolTip()
+
+    for value in (2400.0, 2450.0, 2475.0, 4000.0):
+        tab.dir_offset.setValue(value)
+        assert tab._validate_required_inputs() == []
+
+    for invalid in ("0", "1000", "4500"):
+        tab.dir_offset.lineEdit().setText(invalid)
+        assert any("2400 y 4000" in error for error in tab._validate_required_inputs())
+
+    tab.dir_offset.setValue(3075.0)
+    assert tab.directional_offset_from_second_axis() == 3075.0
+    assert tab.directional_offset_for_solver() == 3700.0
     window.close()
 
 
@@ -569,7 +610,8 @@ def test_semi_1_1_1_solves_with_directional_lift_and_fixed_tandem():
     assert tab.Rd.value() + tab.Rt.value() == 28000.0
     assert tab.dir_offset.value() == 2450.0
     assert lift_load.value_user == 1300.0
-    assert lift_load.x_mm == lifted_rt.x_mm - 2450.0
+    assert tab.directional_offset_for_solver() == 3675.0
+    assert lift_load.x_mm == lifted_rt.x_mm - tab.directional_offset_for_solver()
     assert lifted_rt.x_mm == base_rt.x_mm
     assert lifted_rt.value_user != base_rt.value_user
     assert abs(float(tab.get_diag().eval_V(lifted_cache.beam_plot.L_mm))) < 1e-6
@@ -588,8 +630,8 @@ def test_unit_tabs_have_unified_load_add_controls_and_fixed_tab_bar():
     assert not isinstance(window.tabs.parentWidget(), QScrollArea)
 
     for tab in (window.tab_acoplado, window.tab_semi, window.tab_bitren):
-        groups = [group for group in tab.findChildren(QGroupBox) if group.title() == "Cargas"]
-        assert len(groups) == 1
+        sections = [button for button in tab.findChildren(QToolButton) if button.text() == "Cargas"]
+        assert len(sections) == 1
         assert tab.btn_add_load.text() == "Agregar carga"
         assert tab.btn_del_load.text() == "Eliminar seleccionadas"
         assert not hasattr(tab, "cmb_add_load_type")
@@ -635,15 +677,19 @@ def test_unit_tabs_render_single_general_load_table_without_old_collapsibles():
         app.processEvents()
 
         visible_labels = {label.text() for label in tab.findChildren(QLabel) if label.isVisible()}
-        visible_sections = {button.text() for button in tab.findChildren(QToolButton) if button.isVisible()}
-        assert "Magnitud: kg para puntuales y distribuidas (P total), kg·mm para momentos." in visible_labels
+        visible_buttons = [button for button in tab.findChildren(QToolButton) if button.isVisible()]
+        visible_sections = {button.text() for button in visible_buttons}
+        assert "Cargas" in visible_sections
         assert visible_sections.isdisjoint(forbidden_sections)
+        assert "Bastidor lateral estructural" not in visible_labels
+        assert "Deformada" not in visible_sections
+        assert "Mostrar deformada" not in visible_labels
 
-        load_groups = [
-            group for group in tab.findChildren(QGroupBox)
-            if group.isVisible() and group.title() == "Cargas"
-        ]
-        assert len(load_groups) == 1
+        load_button = next(button for button in visible_buttons if button.text() == "Cargas")
+        load_button.click()
+        app.processEvents()
+        visible_labels = {label.text() for label in tab.findChildren(QLabel) if label.isVisible()}
+        assert "Magnitud: kg para puntuales y distribuidas (P total), kg·mm para momentos." in visible_labels
 
         visible_headers = []
         for table in tab.findChildren(QTableWidget):
@@ -659,6 +705,58 @@ def test_unit_tabs_render_single_general_load_table_without_old_collapsibles():
         assert ("label", "x0_mm", "Lq_mm", "q_kg_per_mm") not in visible_headers
         assert ("label", "x_mm", "M_kgmm") not in visible_headers
 
+    bitren_labels = {
+        label.text()
+        for label in window.tab_bitren.findChildren(QLabel)
+        if label.isVisible()
+    }
+    bitren_buttons = {
+        button.text()
+        for button in window.tab_bitren.findChildren(QToolButton)
+        if button.isVisible()
+    }
+    assert not any("direccional" in text.lower() for text in bitren_labels | bitren_buttons)
+
+    window.close()
+
+
+def test_about_action_is_single_button_at_top_bar_right(monkeypatch):
+    app = _app()
+    window = FBDApp()
+    window.show()
+    app.processEvents()
+
+    assert [action.text() for action in window.menuBar().actions()] == []
+
+    about_buttons = [
+        button
+        for button in window.findChildren(QPushButton)
+        if button.text() == "Acerca de Calculeitor"
+    ]
+    assert about_buttons == [window.btn_about]
+    assert window.btn_about.parentWidget() is window.btn_export_memoria_docx.parentWidget()
+    assert window.btn_about.geometry().x() > window.btn_export_memoria_docx.geometry().x()
+    assert window.btn_about.geometry().right() > window.btn_export_memoria_docx.geometry().right()
+
+    tab_texts = [window.tabs.tabText(index) for index in range(window.tabs.count())]
+    assert tab_texts == ["Acoplado", "Semirremolque", "Bitren", "Cálculo y verificación"]
+    assert not any(
+        button.text() == "Ayuda"
+        for button in window.findChildren(QPushButton)
+    )
+
+    calls = []
+
+    def fake_about(parent, title, text):
+        calls.append((parent, title, text))
+
+    monkeypatch.setattr(QMessageBox, "about", fake_about)
+    window.btn_about.click()
+
+    assert len(calls) == 1
+    assert calls[0][0] is window
+    assert calls[0][1] == "Acerca de Calculeitor"
+    assert "Calculeitor" in calls[0][2]
     window.close()
 
 

@@ -565,8 +565,6 @@ def _add_row_memory(doc, card: Dict[str, Any], fs_required: float) -> None:
     optional_status: List[str] = []
     if not card.get("include_bastidor_lateral"):
         optional_status.append("Bastidor lateral: no activado.")
-    elif not card.get("bastidor_lateral_structural"):
-        optional_status.append("Bastidor lateral: activado, pero no considerado estructural; no se incluye en la sección resistente.")
     elif card.get("bastidor_lateral_included"):
         optional_status.append(
             f"Bastidor lateral: incluido en la sección resistente. Altura: {_fmt_num(card.get('bastidor_lateral_height_mm'), 2)} mm."

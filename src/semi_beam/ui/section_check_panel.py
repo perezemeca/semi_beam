@@ -271,6 +271,10 @@ class SectionCheckPanel(QWidget):
         self.chk_bastidor_lateral = QCheckBox("Agregar bastidor lateral")
         self.chk_bastidor_lateral_structural = QCheckBox("Bastidor lateral estructural")
         self.chk_bastidor_lateral_structural.setChecked(True)
+        self.chk_bastidor_lateral_structural.setVisible(False)
+        self.chk_bastidor_lateral_structural.toggled.connect(
+            lambda checked: self.chk_bastidor_lateral_structural.setChecked(True) if not checked else None
+        )
         self.n_bastidor_lateral_altura = FlexibleDoubleSpinBox()
         self.n_bastidor_lateral_altura.setRange(
             BASTIDOR_LATERAL_ALTURA_MIN_MM,
@@ -313,7 +317,6 @@ class SectionCheckPanel(QWidget):
         form.addRow("Espesor planchuela inferior - 5.0 in - 127 mm:", self.cmb_t_bot)
         form.addRow("FS mínimo:", self.n_min)
         form.addRow(self.chk_bastidor_lateral)
-        form.addRow(self.chk_bastidor_lateral_structural)
         form.addRow("Altura bastidor lateral:", self.n_bastidor_lateral_altura)
         form.addRow(self.chk_piso)
         form.addRow("Ancho piso [mm]:", self.n_piso_width)
@@ -422,7 +425,6 @@ class SectionCheckPanel(QWidget):
         self.cmb_mat_piso.currentTextChanged.connect(self._on_global_changed)
         self.n_min.valueChanged.connect(self._schedule_recompute)
         self.chk_bastidor_lateral.toggled.connect(self._on_bastidor_lateral_changed)
-        self.chk_bastidor_lateral_structural.toggled.connect(self._on_bastidor_lateral_changed)
         self.n_bastidor_lateral_altura.valueChanged.connect(self._on_bastidor_lateral_changed)
         self.chk_piso.toggled.connect(self._on_piso_changed)
         self.n_piso_width.valueChanged.connect(self._on_piso_changed)
@@ -705,13 +707,13 @@ class SectionCheckPanel(QWidget):
     # -------- Bastidor lateral ----------
     def _update_bastidor_lateral_controls(self) -> None:
         enabled = bool(self.chk_bastidor_lateral.isChecked())
-        self.chk_bastidor_lateral_structural.setEnabled(enabled)
+        self.chk_bastidor_lateral_structural.setChecked(True)
+        self.chk_bastidor_lateral_structural.setEnabled(False)
         self.n_bastidor_lateral_altura.setEnabled(enabled)
 
     def _include_bastidor_lateral_in_geometry(self) -> bool:
         return (
             bool(self.chk_bastidor_lateral.isChecked())
-            and bool(self.chk_bastidor_lateral_structural.isChecked())
             and not bool(self._base_geometry_includes_bastidor_lateral)
         )
 
@@ -1855,7 +1857,7 @@ class SectionCheckPanel(QWidget):
                     "missing_material_components": missing_materials,
                     "section": sec,
                     "include_bastidor_lateral": bool(self.chk_bastidor_lateral.isChecked()),
-                    "bastidor_lateral_structural": bool(self.chk_bastidor_lateral_structural.isChecked()),
+                    "bastidor_lateral_structural": True,
                     "bastidor_lateral_included": isinstance(sec, CompositeSection) and sec.includes_bastidor_lateral,
                     "bastidor_lateral_height_mm": float(self.n_bastidor_lateral_altura.value()),
                     "include_piso": bool(self.chk_piso.isChecked()),
@@ -2055,7 +2057,7 @@ class SectionCheckPanel(QWidget):
             "fs_required": float(self.n_min.value()),
             "n_beams": int(self.n_beams),
             "include_bastidor_lateral": bool(self.chk_bastidor_lateral.isChecked()),
-            "bastidor_lateral_structural": bool(self.chk_bastidor_lateral_structural.isChecked()),
+            "bastidor_lateral_structural": True,
             "bastidor_lateral_included": bool(self._include_bastidor_lateral_in_geometry()),
             "bastidor_lateral_height_mm": float(self.n_bastidor_lateral_altura.value()),
             "include_piso": bool(self.chk_piso.isChecked()),
@@ -2151,7 +2153,7 @@ class SectionCheckPanel(QWidget):
             "fs_min": float(self.n_min.value()),
             "n_beams": int(self.n_beams),
             "include_bastidor_lateral": bool(self.chk_bastidor_lateral.isChecked()),
-            "bastidor_lateral_structural": bool(self.chk_bastidor_lateral_structural.isChecked()),
+            "bastidor_lateral_structural": True,
             "bastidor_lateral_height_mm": float(self.n_bastidor_lateral_altura.value()),
             "include_piso": bool(self.chk_piso.isChecked()),
             "espesor_piso": self._current_piso_thickness_mm(),
@@ -2253,7 +2255,7 @@ class SectionCheckPanel(QWidget):
             "t_bot_in": self._current_thickness_in(self.cmb_t_bot),
             "fs_min": float(self.n_min.value()),
             "include_bastidor_lateral": bool(self.chk_bastidor_lateral.isChecked()),
-            "bastidor_lateral_structural": bool(self.chk_bastidor_lateral_structural.isChecked()),
+            "bastidor_lateral_structural": True,
             "bastidor_lateral_height_mm": float(self.n_bastidor_lateral_altura.value()),
             "include_piso": bool(self.chk_piso.isChecked()),
             "espesor_piso": self._current_piso_thickness_mm(),
@@ -2294,7 +2296,7 @@ class SectionCheckPanel(QWidget):
                     pass
 
             self.chk_bastidor_lateral.setChecked(bool(state.get("include_bastidor_lateral", False)))
-            self.chk_bastidor_lateral_structural.setChecked(bool(state.get("bastidor_lateral_structural", True)))
+            self.chk_bastidor_lateral_structural.setChecked(True)
             bastidor_height = state.get("bastidor_lateral_height_mm")
             if bastidor_height is not None:
                 try:

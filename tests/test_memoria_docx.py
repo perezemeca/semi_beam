@@ -403,7 +403,7 @@ def test_docx_renders_optional_component_status(tmp_path):
 
     assert "Estado de componentes opcionales" in xml
     assert "Bastidor lateral" in xml
-    assert "no considerado estructural" in xml
+    assert "no considerado estructural" not in xml
     assert "Piso" in xml
     assert "Ancho piso" in xml
     assert "soldado a la estructura" in xml

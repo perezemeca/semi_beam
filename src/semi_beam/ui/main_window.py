@@ -15,7 +15,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QWheelEvent, QIcon, QColor, QBrush, QAction
+from PySide6.QtGui import QWheelEvent, QIcon, QColor, QBrush
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
     QLabel, QDoubleSpinBox, QPushButton, QTableWidget, QTableWidgetItem,
@@ -211,6 +211,9 @@ def _point_value(points: List[PointForce], label: str, default: float = 0.0) -> 
 
 APP_VERSION = "1.0.0"
 APP_TITLE_BASE = "Calculeitor - Acoplado / Semirremolque / Bitren"
+
+DIRECTIONAL_OFFSET_MIN_MM = 2400.0
+DIRECTIONAL_OFFSET_MAX_MM = 4000.0
 MEMORIA_EXPORT_IMAGE_DPI = 220
 
 
@@ -303,12 +306,22 @@ class UnitTab(QWidget):
         self.Rt = FlexibleDoubleSpinBox()
         self._setup_motor_spin(self.Rt, minv=0.0, maxv=1e12, decimals=2, step=50.0)
 
-        # Direccional (semi/bitren)
+        # Direccional (solo semirremolque)
         self.Rd = FlexibleDoubleSpinBox()
         self._setup_motor_spin(self.Rd, minv=-1e12, maxv=1e12, decimals=2, step=50.0)
 
         self.dir_offset = FlexibleDoubleSpinBox()
-        self._setup_motor_spin(self.dir_offset, minv=0.0, maxv=20000.0, decimals=1, step=25.0)
+        self._setup_motor_spin(
+            self.dir_offset,
+            minv=DIRECTIONAL_OFFSET_MIN_MM,
+            maxv=DIRECTIONAL_OFFSET_MAX_MM,
+            decimals=1,
+            step=25.0,
+        )
+        self.dir_offset.setToolTip(
+            "Distancia normativa desde el segundo eje al eje direccional. "
+            "Rango permitido: 2400 a 4000 mm."
+        )
 
         # Bitren Rp2
         self.x_rp2_rel = FlexibleDoubleSpinBox()
@@ -338,9 +351,9 @@ class UnitTab(QWidget):
         form.addRow(lbl_r, self.R_front_or_kp)
         form.addRow("Reacción en tándem [Kg] (UP+):", self.Rt)
 
-        if not self.is_acoplado:
+        if (not self.is_acoplado) and (not self.is_bitren):
             form.addRow("Reacción en direccional [Kg] (UP+):", self.Rd)
-            form.addRow("Offset direccional (x_t - offset) [mm]:", self.dir_offset)
+            form.addRow("Offset direccional desde 2º eje [mm]:", self.dir_offset)
 
         if self.is_bitren:
             form.addRow("x_Rp2 relativo a L [mm]:", self.x_rp2_rel)
@@ -361,8 +374,9 @@ class UnitTab(QWidget):
         # Inicializar opciones de config
         self._populate_configs()
 
-        load_box = QGroupBox("Cargas")
-        load_lay = QVBoxLayout(load_box)
+        load_box = CollapsibleBox("Cargas")
+        self._all_boxes.append(load_box)
+        load_lay = load_box.content_layout()
         load_lay.addWidget(QLabel("Magnitud: kg para puntuales y distribuidas (P total), kg·mm para momentos."))
         self.tbl = QTableWidget(0, 4)
         self.tbl.setHorizontalHeaderLabels(["Tipo", "Magnitud", "Posición / centro [mm]", "Longitud [mm]"])
@@ -399,19 +413,6 @@ class UnitTab(QWidget):
         self.section_panel = SectionCheckPanel()
         s_v.addWidget(self.section_panel)
 
-        # ==========================
-        # Collapsible: Deformada
-        # ==========================
-        d_box = CollapsibleBox("Deformada")
-        self._all_boxes.append(d_box)
-        root.addWidget(d_box)
-        d_v = d_box.content_layout()
-
-        defl_form_w = QWidget()
-        defl_form = QFormLayout(defl_form_w)
-        defl_form.setRowWrapPolicy(QFormLayout.WrapAllRows)
-        defl_form.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
-
         self.chk_show_deflection = QCheckBox("Mostrar deformada")
         self.chk_show_deflection.setChecked(True)
         self.lbl_defl_e = QLabel("21000 kg/mm²")
@@ -419,11 +420,6 @@ class UnitTab(QWidget):
         self.lbl_deflection = QLabel("Convexidad L/2: +30 mm\nvmin total: -\nUtilizado: - / 60 mm\nEstado: -")
         self.lbl_deflection.setWordWrap(True)
         self.lbl_deflection.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
-
-        defl_form.addRow(self.chk_show_deflection)
-        defl_form.addRow("E [kg/mm²]:", self.lbl_defl_e)
-        d_v.addWidget(defl_form_w)
-        d_v.addWidget(self.lbl_deflection)
 
         # ==========================
         # Collapsible: Notas
@@ -495,12 +491,12 @@ class UnitTab(QWidget):
     def _config_uses_directional(self) -> bool:
         cfg = (self.cmb_config.currentText() or "").strip()
         compact = cfg.replace(" ", "")
-        return (not self.is_acoplado) and any(marker in compact for marker in ("1+2", "1+3", "1+1+1"))
+        return (not self.is_acoplado) and (not self.is_bitren) and any(marker in compact for marker in ("1+2", "1+3", "1+1+1"))
 
     def _axis_lift_mode(self) -> Optional[Tuple[str, str, float]]:
         cfg = (self.cmb_config.currentText() or "").strip()
         compact = cfg.replace(" ", "")
-        if any(marker in compact for marker in ("1+2", "1+3", "1+1+1")):
+        if self._config_uses_directional():
             return ("directional", "Levantar direccional", 1300.0)
         if cfg.startswith("2 ejes") or cfg.startswith("3 ejes"):
             return ("first_axle", "Levantar primer eje", 1200.0)
@@ -529,6 +525,28 @@ class UnitTab(QWidget):
         if cfg.startswith("3 ejes"):
             return 1250.0
         return 0.0
+
+    def _directional_second_axis_offset_from_tandem_center(self) -> float:
+        cfg = (self.cmb_config.currentText() or "").strip().replace(" ", "")
+        if "1+2" in cfg:
+            return 625.0
+        if "1+3" in cfg:
+            return 1250.0
+        if "1+1+1" in cfg:
+            return 1225.0
+        return 0.0
+
+    def directional_offset_from_second_axis(self) -> Optional[float]:
+        value = _spin_value_or_none(self.dir_offset)
+        if value is None:
+            return None
+        return float(value)
+
+    def directional_offset_for_solver(self) -> Optional[float]:
+        value = self.directional_offset_from_second_axis()
+        if value is None:
+            return None
+        return float(value) + self._directional_second_axis_offset_from_tandem_center()
 
     def axis_lift_load(self, *, x_t_mm: float, x_d_mm: Optional[float]) -> Optional[PointForce]:
         if not self.axis_lift_enabled():
@@ -597,7 +615,7 @@ class UnitTab(QWidget):
         if self._config_uses_directional():
             required_motor.extend([
                 ("Reacción en direccional Rd [Kg]", self.Rd),
-                ("Offset direccional [mm]", self.dir_offset),
+                ("Offset direccional desde 2º eje [mm]", self.dir_offset),
             ])
         if self.is_bitren:
             required_motor.extend([
@@ -613,6 +631,11 @@ class UnitTab(QWidget):
         lc = _spin_value_or_none(self.Lc)
         if lc is not None and lc <= 0:
             errors.append("El largo carrozable debe ser mayor a 0.")
+
+        if self._config_uses_directional():
+            dir_offset = self.directional_offset_from_second_axis()
+            if dir_offset is not None and not (DIRECTIONAL_OFFSET_MIN_MM <= dir_offset <= DIRECTIONAL_OFFSET_MAX_MM):
+                errors.append("El offset direccional desde 2º eje debe estar entre 2400 y 4000 mm.")
 
         _points, _dists, _moms, load_errors = self._build_loads_from_table()
         errors.extend(load_errors)
@@ -944,7 +967,8 @@ class UnitTab(QWidget):
         return self._view_mode
 
     def deflection_enabled(self) -> bool:
-        return bool(self.chk_show_deflection.isChecked())
+        self.chk_show_deflection.setChecked(True)
+        return True
 
     def deflection_params(self) -> Optional[float]:
         return 2.1e4
@@ -1013,7 +1037,7 @@ class UnitTab(QWidget):
                 "x_rp2_rel": _spin_text(self.x_rp2_rel),
                 "Rp2": _spin_text(self.Rp2),
             },
-            "show_deflection": bool(self.chk_show_deflection.isChecked()),
+            "show_deflection": True,
             "axis_lift_enabled": self.axis_lift_enabled(),
             "view_mode": self.view_mode(),
             "loads": load_rows,
@@ -1115,7 +1139,7 @@ class UnitTab(QWidget):
             ):
                 _set_spin_from_text(spin, motor_inputs.get(key))
 
-        self.chk_show_deflection.setChecked(bool(state.get("show_deflection", True)))
+        self.chk_show_deflection.setChecked(True)
         self.chk_axis_lift.setChecked(bool(state.get("axis_lift_enabled", False)) and self.chk_axis_lift.isEnabled())
         loads = state.get("loads")
         self._set_load_rows(loads if isinstance(loads, list) else _legacy_load_rows(state))
@@ -1140,8 +1164,6 @@ class FBDApp(QMainWindow):
             self.setWindowIcon(QIcon(ensure_calculeitor_icon()))
         except Exception:
             pass
-        self._build_about_menu()
-
         root = QWidget()
         self.setCentralWidget(root)
         main = QHBoxLayout(root)
@@ -1197,11 +1219,14 @@ class FBDApp(QMainWindow):
         self.btn_load_study = QPushButton("Cargar estudio")
         self.btn_export_plots = QPushButton("Exportar gráficos (FBD, V(x), M(x), deformada)")
         self.btn_export_memoria_docx = QPushButton("Exportar memoria de cálculo")
+        self.btn_about = QPushButton("Acerca de Calculeitor")
+        self.btn_about.clicked.connect(self._show_about)
         btn_row.addWidget(self.btn_save_study)
         btn_row.addWidget(self.btn_load_study)
         btn_row.addWidget(self.btn_export_plots)
         btn_row.addWidget(self.btn_export_memoria_docx)
         btn_row.addStretch(1)
+        btn_row.addWidget(self.btn_about)
 
         right.addLayout(btn_row)
         right.addWidget(self.plot_scroll)
@@ -1230,7 +1255,7 @@ class FBDApp(QMainWindow):
             wire(tab.R_front_or_kp)
             wire(tab.Rt)
 
-            if not tab.is_acoplado:
+            if (not tab.is_acoplado) and (not tab.is_bitren):
                 wire(tab.Rd)
                 wire(tab.dir_offset)
             if tab.is_bitren:
@@ -1243,7 +1268,6 @@ class FBDApp(QMainWindow):
 
             tab.tbl.cellChanged.connect(lambda *_, t=tab: self._schedule_replot_tab(t, reset_solution=True))
             tab.chk_axis_lift.toggled.connect(lambda *_, t=tab: self._schedule_axis_lift_replot(t))
-            tab.chk_show_deflection.toggled.connect(lambda *_, t=tab: self._schedule_replot_tab(t, reset_solution=False))
             tab.section_panel.inertia_inputs_changed.connect(lambda t=tab: self._schedule_replot_tab(t, reset_solution=False))
 
         self.tab_reactions.plot_data_changed.connect(self._schedule_active_replot)
@@ -1263,12 +1287,6 @@ class FBDApp(QMainWindow):
         self._resize_timer.setSingleShot(True)
         self._resize_timer.timeout.connect(self._replot_active_tab)
         self.canvas.mpl_connect("resize_event", lambda evt: self._resize_timer.start(80))
-
-    def _build_about_menu(self) -> None:
-        help_menu = self.menuBar().addMenu("Ayuda")
-        about_action = QAction("Acerca de Calculeitor", self)
-        about_action.triggered.connect(self._show_about)
-        help_menu.addAction(about_action)
 
     def _show_about(self) -> None:
         QMessageBox.about(
@@ -1862,7 +1880,7 @@ class FBDApp(QMainWindow):
                 directional = DirectionalSupport(
                     label="Rd",
                     reaction_user=float(_spin_value_or_none(tab.Rd)),
-                    offset_mm=float(_spin_value_or_none(tab.dir_offset))
+                    offset_mm=float(tab.directional_offset_for_solver())
                 )
 
             hitch = None
@@ -1944,6 +1962,9 @@ class FBDApp(QMainWindow):
                 note_lines.append(f"Bitren: x_Rp2_abs = {_fmt_plain(x_rp2_abs, 0)} mm")
             if res.x_d_mm is not None:
                 note_lines.append(f"x_d = {_fmt_plain(res.x_d_mm, 0)} mm")
+                ui_dir_offset = tab.directional_offset_from_second_axis()
+                if ui_dir_offset is not None:
+                    note_lines.append(f"Offset direccional desde 2º eje = {_fmt_plain(ui_dir_offset, 0)} mm")
             lift_desc = tab.axis_lift_description(x_t_mm=float(res.x_t_mm), x_d_mm=res.x_d_mm)
             if lift_desc is not None:
                 note_lines.append(lift_desc)
@@ -2438,7 +2459,7 @@ class FBDApp(QMainWindow):
                 directional = DirectionalSupport(
                     label="Rd",
                     reaction_user=float(_spin_value_or_none(tab.Rd)),
-                    offset_mm=float(_spin_value_or_none(tab.dir_offset)),
+                    offset_mm=float(tab.directional_offset_for_solver()),
                 )
 
             hitch = None
@@ -2581,7 +2602,13 @@ class FBDApp(QMainWindow):
                 if case.hitch is not None:
                     apoyos.append(("Rp2", f"x={_fmt_plain(case.hitch.x_mm, 0)} mm; R={_fmt_plain(case.hitch.reaction_user, 2)} kg (usuario)"))
                 if case.directional is not None:
-                    apoyos.append(("Rd", f"offset={_fmt_plain(case.directional.offset_mm, 0)} mm; R={_fmt_plain(case.directional.reaction_user, 2)} kg (usuario)"))
+                    apoyos.append((
+                        "Rd",
+                        "offset desde 2º eje="
+                        f"{_fmt_plain(tab.directional_offset_from_second_axis(), 0)} mm; "
+                        f"offset interno x_t={_fmt_plain(case.directional.offset_mm, 0)} mm; "
+                        f"R={_fmt_plain(case.directional.reaction_user, 2)} kg (usuario)",
+                    ))
 
                 cargas = []
                 for pf in case.point_forces:
