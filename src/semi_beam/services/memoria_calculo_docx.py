@@ -506,6 +506,14 @@ def _add_row_memory(doc, card: Dict[str, Any], fs_required: float) -> None:
                 ("Ubicación bastidores", "x = ±1250 mm; apertura hacia el centro"),
             ]
         )
+    if card.get("frame_reinforcement_enabled"):
+        kv_rows.extend(
+            [
+                ("Refuerzo de bastidor", "Sí, dos chapas verticales paralelas al alma del bastidor"),
+                ("Espesor refuerzo de bastidor", f"{_fmt_num(card.get('frame_reinforcement_thickness_mm'), 2)} mm ({card.get('frame_reinforcement_thickness_in', '-')})"),
+                ("Ubicación refuerzo de bastidor", "x = -1210 mm y x = 1210 mm"),
+            ]
+        )
     if card.get("piso_included"):
         piso_width = _safe_float(_piso_width_mm(card))
         piso_half_width = None if piso_width is None else piso_width / 2.0
@@ -571,6 +579,13 @@ def _add_row_memory(doc, card: Dict[str, Any], fs_required: float) -> None:
         )
     else:
         optional_status.append("Bastidor lateral: activo, pero no incluido en esta sección.")
+
+    if card.get("frame_reinforcement_enabled"):
+        optional_status.append(
+            f"Refuerzo de bastidor: incluido. Espesor: {_fmt_num(card.get('frame_reinforcement_thickness_mm'), 2)} mm."
+        )
+    else:
+        optional_status.append("Refuerzo de bastidor: no activado.")
 
     if not card.get("include_piso"):
         optional_status.append("Piso: No incluido.")
@@ -689,7 +704,12 @@ def _add_row_memory(doc, card: Dict[str, Any], fs_required: float) -> None:
             _add_kv_table(doc, [("Estado de verificación", fs_text)])
         return
     _add_paragraph(doc, "Desarrollo geométrico y resistente", bold=True, font_size=9.3, color="334155", spacing_after_pt=3)
-    if card.get("bastidor_lateral_included") or card.get("piso_included") or card.get("chapon_included"):
+    if (
+        card.get("bastidor_lateral_included")
+        or card.get("frame_reinforcement_enabled")
+        or card.get("piso_included")
+        or card.get("chapon_included")
+    ):
         equations = [
             f"H_comp = {_fmt_num(card.get('h_total_mm'), 2)} mm",
             f"y_bar = sum(A_i * y_i) / sum(A_i) = {_fmt_num(card.get('ybar_cm'), 4)} cm",

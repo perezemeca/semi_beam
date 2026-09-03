@@ -5,7 +5,7 @@ import os
 import tempfile
 from typing import Any, Callable, Dict, Optional, List
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import QSignalBlocker, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QBrush
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QLabel,
@@ -66,6 +66,8 @@ CHAPON_ESPESOR_OPTIONS_MM = (
     ('5/16" - 7.9375 mm', 7.9375),
     ('3/8" - 9.525 mm', 9.525),
 )
+FRAME_REINFORCEMENT_OFFSET_FROM_BASTIDOR_MM = 40.0
+FRAME_REINFORCEMENT_THICKNESS_OPTIONS = ["3/16", "1/4", "5/16", "3/8"]
 VIGA_LEFT_FACE_INTERIOR_MM = -389.0
 VIGA_LEFT_FACE_EXTERIOR_MM = -516.0
 VIGA_RIGHT_FACE_INTERIOR_MM = 389.0
@@ -306,6 +308,14 @@ class SectionCheckPanel(QWidget):
         self.cmb_espesor_chapon = QComboBox()
         self._populate_chapon_thickness_combo(default=6.35)
         _configure_combo_for_contents(self.cmb_espesor_chapon)
+        self.chk_frame_reinforcement = QCheckBox("Refuerzo de bastidor")
+        self.cmb_frame_reinforcement_thickness = QComboBox()
+        self._populate_thickness_combo(
+            self.cmb_frame_reinforcement_thickness,
+            FRAME_REINFORCEMENT_THICKNESS_OPTIONS,
+            default="1/4",
+        )
+        _configure_combo_for_contents(self.cmb_frame_reinforcement_thickness)
 
         self._populate_material_combos()
 
@@ -324,6 +334,8 @@ class SectionCheckPanel(QWidget):
         form.addRow(self.chk_chapon)
         form.addRow("Largo chapón [mm]:", self.n_chapon_length)
         form.addRow("Espesor chapón SAE 1010:", self.cmb_espesor_chapon)
+        form.addRow(self.chk_frame_reinforcement)
+        form.addRow("Espesor refuerzo de bastidor:", self.cmb_frame_reinforcement_thickness)
 
         lay.addLayout(form)
         lay.addWidget(self.lbl_info)
@@ -339,6 +351,7 @@ class SectionCheckPanel(QWidget):
         self._preview_current_xlim: Optional[tuple[float, float]] = None
         self._preview_current_ylim: Optional[tuple[float, float]] = None
         self._preview_pan_start: Optional[dict[str, tuple[float, float]]] = None
+        self._last_preview_signature: Optional[tuple[Any, ...]] = None
         self._connect_preview_interaction()
         lay.addWidget(self.canvas)
 
@@ -419,10 +432,10 @@ class SectionCheckPanel(QWidget):
         # Señales
         self.cmb_t_top.currentTextChanged.connect(self._on_global_changed)
         self.cmb_t_bot.currentTextChanged.connect(self._on_global_changed)
-        self.cmb_mat_top.currentTextChanged.connect(self._on_global_changed)
-        self.cmb_mat_bot.currentTextChanged.connect(self._on_global_changed)
-        self.cmb_mat_web.currentTextChanged.connect(self._on_global_changed)
-        self.cmb_mat_piso.currentTextChanged.connect(self._on_global_changed)
+        self.cmb_mat_top.currentTextChanged.connect(self._on_material_changed)
+        self.cmb_mat_bot.currentTextChanged.connect(self._on_material_changed)
+        self.cmb_mat_web.currentTextChanged.connect(self._on_material_changed)
+        self.cmb_mat_piso.currentTextChanged.connect(self._on_material_changed)
         self.n_min.valueChanged.connect(self._schedule_recompute)
         self.chk_bastidor_lateral.toggled.connect(self._on_bastidor_lateral_changed)
         self.n_bastidor_lateral_altura.valueChanged.connect(self._on_bastidor_lateral_changed)
@@ -432,6 +445,8 @@ class SectionCheckPanel(QWidget):
         self.chk_chapon.toggled.connect(self._on_chapon_changed)
         self.n_chapon_length.valueChanged.connect(self._on_chapon_changed)
         self.cmb_espesor_chapon.currentTextChanged.connect(self._on_chapon_changed)
+        self.chk_frame_reinforcement.toggled.connect(self._on_frame_reinforcement_changed)
+        self.cmb_frame_reinforcement_thickness.currentTextChanged.connect(self._on_frame_reinforcement_changed)
 
         self.tbl.itemSelectionChanged.connect(self._repaint_preview_from_selection)
         self.tbl.cellChanged.connect(lambda *_: self._schedule_recompute())
@@ -442,6 +457,7 @@ class SectionCheckPanel(QWidget):
         self._update_bastidor_lateral_controls()
         self._update_piso_controls()
         self._update_chapon_controls()
+        self._update_frame_reinforcement_controls()
         self._update_sigma_labels()
         self._repaint_preview(h_web_override_mm=200.0, t_web_in=0.25)
         self._recompute_all()
@@ -545,6 +561,12 @@ class SectionCheckPanel(QWidget):
             return 0.0
         return float(data)
 
+    def _current_frame_reinforcement_thickness_in(self) -> str:
+        return self._current_thickness_in(self.cmb_frame_reinforcement_thickness)
+
+    def _current_frame_reinforcement_thickness_mm(self) -> float:
+        return _in_to_mm(_parse_frac_in(self._current_frame_reinforcement_thickness_in()))
+
     def _current_piso_width_mm(self) -> float:
         return float(self.n_piso_width.value())
 
@@ -578,11 +600,23 @@ class SectionCheckPanel(QWidget):
     def _double_web_payload_for_row(self, row: int) -> dict[str, Any]:
         enabled = self._row_double_web_enabled(row)
         offset = self._row_double_web_offset_mm(row) if enabled else None
+        label = "Doble" if enabled else "Simple"
+        if self._include_frame_reinforcement_in_geometry():
+            label = f"{label} + refuerzo de bastidor"
         return {
             "double_web_enabled": enabled,
             "double_web_inner_face_offset_mm": offset,
             "double_web_clear_gap_mm": None if offset is None else 2.0 * float(offset),
-            "web_configuration_label": "Doble" if enabled else "Simple",
+            "web_configuration_label": label,
+        }
+
+    def _frame_reinforcement_payload(self) -> dict[str, Any]:
+        enabled = self._include_frame_reinforcement_in_geometry()
+        return {
+            "frame_reinforcement_enabled": enabled,
+            "frame_reinforcement_offset_from_bastidor_mm": FRAME_REINFORCEMENT_OFFSET_FROM_BASTIDOR_MM if enabled else None,
+            "frame_reinforcement_thickness_in": self._current_frame_reinforcement_thickness_in(),
+            "frame_reinforcement_thickness_mm": self._current_frame_reinforcement_thickness_mm() if enabled else None,
         }
 
     def _sync_double_web_row_controls(self, row: int) -> None:
@@ -781,6 +815,19 @@ class SectionCheckPanel(QWidget):
 
     def _on_chapon_changed(self, *_args) -> None:
         self._update_chapon_controls()
+        self._repaint_preview_from_selection()
+        self._schedule_recompute()
+        self._emit_inertia_inputs_changed()
+
+    # -------- Refuerzo de bastidor ----------
+    def _update_frame_reinforcement_controls(self) -> None:
+        self.cmb_frame_reinforcement_thickness.setEnabled(bool(self.chk_frame_reinforcement.isChecked()))
+
+    def _include_frame_reinforcement_in_geometry(self) -> bool:
+        return bool(self.chk_frame_reinforcement.isChecked())
+
+    def _on_frame_reinforcement_changed(self, *_args) -> None:
+        self._update_frame_reinforcement_controls()
         self._repaint_preview_from_selection()
         self._schedule_recompute()
         self._emit_inertia_inputs_changed()
@@ -1158,6 +1205,17 @@ class SectionCheckPanel(QWidget):
             SectionRect(right_x0, sec.t_bot_mm + sec.h_web_mm, sec.b_f_mm, sec.t_top_mm, "viga_der_ala_sup"),
         ]
 
+    def _frame_reinforcement_rects(self, top_y_mm: float) -> list[SectionRect]:
+        t = self._current_frame_reinforcement_thickness_mm()
+        h = float(self.n_bastidor_lateral_altura.value())
+        y0 = float(top_y_mm) - h
+        x_left = -BASTIDOR_LATERAL_DISTANCIA_MM + FRAME_REINFORCEMENT_OFFSET_FROM_BASTIDOR_MM
+        x_right = BASTIDOR_LATERAL_DISTANCIA_MM - FRAME_REINFORCEMENT_OFFSET_FROM_BASTIDOR_MM
+        return [
+            SectionRect(x_left - t / 2.0, y0, t, h, "bastidor_izq_refuerzo"),
+            SectionRect(x_right - t / 2.0, y0, t, h, "bastidor_der_refuerzo"),
+        ]
+
     def _bastidor_lateral_rects(self, top_y_mm: float) -> list[SectionRect]:
         h = float(self.n_bastidor_lateral_altura.value())
         t = BASTIDOR_LATERAL_ESPESOR_MM
@@ -1212,7 +1270,8 @@ class SectionCheckPanel(QWidget):
         include_bastidor = self._include_bastidor_lateral_in_geometry()
         include_piso = self._include_piso_in_geometry()
         include_chapon = self._include_chapon_in_geometry(station_mm)
-        if not include_bastidor and not include_piso and not include_chapon and not double_web_enabled:
+        include_frame_reinforcement = self._include_frame_reinforcement_in_geometry()
+        if not include_bastidor and not include_piso and not include_chapon and not double_web_enabled and not include_frame_reinforcement:
             return base
 
         rects = self._double_i_rects(
@@ -1221,6 +1280,8 @@ class SectionCheckPanel(QWidget):
             double_web_inner_face_offset_mm=double_web_inner_face_offset_mm,
         )
         chapon_end = self._chapon_end_mm()
+        if include_frame_reinforcement:
+            rects.extend(self._frame_reinforcement_rects(base.H_mm))
         if include_chapon:
             rects.extend(self._chapon_rects(0.0))
         if include_bastidor:
@@ -1245,10 +1306,15 @@ class SectionCheckPanel(QWidget):
     def _calculation_n_beams(self, sec: ISection | CompositeSection) -> int:
         return 1 if isinstance(sec, CompositeSection) else int(self.n_beams)
 
+    @staticmethod
+    def _clear_section_preview_artists(ax) -> None:
+        for artist in (*tuple(ax.lines), *tuple(ax.patches), *tuple(ax.texts)):
+            artist.remove()
+
     def _draw_section_preview_on(self, ax, sec: ISection | CompositeSection):
         p = sec.props_mm()
 
-        ax.clear()
+        self._clear_section_preview_artists(ax)
         if isinstance(sec, CompositeSection):
             rects = list(sec.rects)
             for rect in rects:
@@ -1442,12 +1508,38 @@ class SectionCheckPanel(QWidget):
                 double_web_inner_face_offset_mm=self._row_double_web_offset_mm(r),
             )
         except DoubleWebGeometryError:
-            self.ax.clear()
+            signature = ("error", "double_web")
+            if signature == self._last_preview_signature:
+                return
+            self._clear_section_preview_artists(self.ax)
             self.ax.text(0.5, 0.5, "ERR DOBLE ALMA", ha="center", va="center", transform=self.ax.transAxes)
             self.ax.axis("off")
         else:
+            signature = self._section_preview_signature(sec)
+            if signature == self._last_preview_signature:
+                return
             self._draw_section_preview_on(self.ax, sec)
+        self._last_preview_signature = signature
         self.canvas.draw_idle()
+
+    @staticmethod
+    def _section_preview_signature(sec: ISection | CompositeSection) -> tuple[Any, ...]:
+        if isinstance(sec, CompositeSection):
+            return (
+                "composite",
+                tuple(
+                    (rect.x0_mm, rect.y0_mm, rect.b_mm, rect.h_mm, rect.label)
+                    for rect in sec.rects
+                ),
+            )
+        return (
+            "i_section",
+            sec.b_f_mm,
+            sec.t_top_mm,
+            sec.t_bot_mm,
+            sec.h_web_mm,
+            sec.t_web_mm,
+        )
 
     def _repaint_preview_from_selection(self):
         r = self.tbl.currentRow()
@@ -1465,6 +1557,11 @@ class SectionCheckPanel(QWidget):
         self._schedule_recompute()
         self._emit_inertia_inputs_changed()
 
+    def _on_material_changed(self, *_):
+        # Allowable stress changes section checks, but not I(x) or the main canvas.
+        self._update_sigma_labels()
+        self._schedule_recompute()
+
     # -------- Tabla / recompute ----------
     def _on_table_item_changed(self, it: QTableWidgetItem):
         if it is None:
@@ -1472,7 +1569,7 @@ class SectionCheckPanel(QWidget):
         r, c = it.row(), it.column()
         if c == self.COL_X:
             self._auto_fill_M_for_row(r)
-        if c in (self.COL_HWEB, self.COL_DOUBLE_WEB_OFFSET) and r == self.tbl.currentRow():
+        if c in (self.COL_X, self.COL_HWEB, self.COL_DOUBLE_WEB_OFFSET) and r == self.tbl.currentRow():
             self._repaint_preview_from_selection()
         if c in (self.COL_X, self.COL_HWEB, self.COL_DOUBLE_WEB_OFFSET):
             self._emit_inertia_inputs_changed()
@@ -1567,6 +1664,13 @@ class SectionCheckPanel(QWidget):
             self._pending_recompute_after_edit = True
             self._timer.stop()
             return
+        blocker = QSignalBlocker(self.tbl)
+        try:
+            self._recompute_all_rows()
+        finally:
+            blocker.unblock()
+
+    def _recompute_all_rows(self):
         nmin = float(self.n_min.value())
 
         for r in range(self.tbl.rowCount()):
@@ -1772,6 +1876,7 @@ class SectionCheckPanel(QWidget):
                 )
             except DoubleWebGeometryError as e:
                 double_web_payload = self._double_web_payload_for_row(r)
+                frame_reinforcement_payload = self._frame_reinforcement_payload()
                 cards.append(
                     {
                         "sec": _get_text(self.tbl, r, self.COL_SEC) or str(r + 1),
@@ -1791,6 +1896,7 @@ class SectionCheckPanel(QWidget):
                         "fs_text": "ERR DOBLE ALMA",
                         "ok": False,
                         **double_web_payload,
+                        **frame_reinforcement_payload,
                         "double_web_error": str(e),
                         "moment_kgcm": M_value,
                     }
@@ -1823,6 +1929,7 @@ class SectionCheckPanel(QWidget):
             fs_top = row_result["fs_top"]
             fs_bot = row_result["fs_bot"]
             double_web_payload = self._double_web_payload_for_row(r)
+            frame_reinforcement_payload = self._frame_reinforcement_payload()
             if no_flex_demand:
                 fs_value = math.inf
                 fs_text = FLEX_NO_DEMAND_TEXT
@@ -1870,6 +1977,7 @@ class SectionCheckPanel(QWidget):
                     "chapon_context_error": bool(chapon_context_error),
                     "chapon_context_missing_fields": chapon_context_missing_fields,
                     **double_web_payload,
+                    **frame_reinforcement_payload,
                     "double_web_error": row_result["double_web_error"],
                     "material_chapon": CHAPON_MATERIAL_ID,
                     "espesor_chapon": self._current_chapon_thickness_mm(),
@@ -2167,6 +2275,7 @@ class SectionCheckPanel(QWidget):
             "chapon_length_mm": self._chapon_length_mm(),
             "chapon_x_start_mm": 0.0,
             "chapon_x_end_mm": self._chapon_end_mm(),
+            **self._frame_reinforcement_payload(),
             "deflection": dict(self._deflection_context) if self._deflection_context else None,
             "rows": [],
         }
@@ -2193,6 +2302,8 @@ class SectionCheckPanel(QWidget):
                 "Wcrit_cm3": _get_text(self.tbl, r, self.COL_WCRIT),
                 "Wreq_cm3": _get_text(self.tbl, r, self.COL_WREQ),
                 "sigma_max": _get_text(self.tbl, r, self.COL_SIGMAX),
+                **self._double_web_payload_for_row(r),
+                **self._frame_reinforcement_payload(),
             }
             out["rows"].append(row)
 
@@ -2266,6 +2377,8 @@ class SectionCheckPanel(QWidget):
             "chapon_length_mm": self._chapon_length_mm() or CHAPON_LENGTH_DEFAULT_MM,
             "chapon_x_start_mm": 0.0,
             "chapon_x_end_mm": self._chapon_end_mm(),
+            "frame_reinforcement_enabled": bool(self.chk_frame_reinforcement.isChecked()),
+            "frame_reinforcement_thickness_in": self._current_frame_reinforcement_thickness_in(),
             "rows": rows,
         }
 
@@ -2329,6 +2442,10 @@ class SectionCheckPanel(QWidget):
                     _set_combo_data(self.cmb_espesor_chapon, float(espesor_chapon))
                 except Exception:
                     pass
+            frame_reinforcement_enabled = state.get("frame_reinforcement_enabled", state.get("inner_web_enabled", False))
+            frame_reinforcement_thickness = state.get("frame_reinforcement_thickness_in", state.get("inner_web_thickness_in", "1/4"))
+            self.chk_frame_reinforcement.setChecked(bool(frame_reinforcement_enabled))
+            _set_combo_data(self.cmb_frame_reinforcement_thickness, frame_reinforcement_thickness)
             rows = state.get("rows")
             if isinstance(rows, list):
                 for r in range(self.tbl.rowCount()):
@@ -2360,5 +2477,6 @@ class SectionCheckPanel(QWidget):
         self._update_bastidor_lateral_controls()
         self._update_piso_controls()
         self._update_chapon_controls()
+        self._update_frame_reinforcement_controls()
         self._repaint_preview_from_selection()
         self._recompute_all()

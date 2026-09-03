@@ -5,7 +5,13 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QAbstractItemView, QSizePolicy
 
-from semi_beam.ui.section_check_panel import FLEX_NO_DEMAND_TEXT, SectionCheckPanel, build_web_rects
+from semi_beam.ui.section_check_panel import (
+    FLEX_NO_DEMAND_TEXT,
+    BASTIDOR_LATERAL_DISTANCIA_MM,
+    FRAME_REINFORCEMENT_OFFSET_FROM_BASTIDOR_MM,
+    SectionCheckPanel,
+    build_web_rects,
+)
 
 
 def _app():
@@ -126,6 +132,25 @@ def test_section_panel_thickness_combo_uses_cell_width_policy():
     assert combo.currentData() == "1/4"
 
 
+def test_section_panel_frame_reinforcement_options_are_available_and_disabled_by_default():
+    _app()
+    panel = SectionCheckPanel()
+
+    options = {
+        panel.cmb_frame_reinforcement_thickness.itemData(i)
+        for i in range(panel.cmb_frame_reinforcement_thickness.count())
+    }
+
+    assert panel.chk_frame_reinforcement.text() == "Refuerzo de bastidor"
+    assert options == {"3/16", "1/4", "5/16", "3/8"}
+    assert panel.chk_frame_reinforcement.isChecked() is False
+    assert panel.cmb_frame_reinforcement_thickness.isEnabled() is False
+
+    panel.chk_frame_reinforcement.setChecked(True)
+
+    assert panel.cmb_frame_reinforcement_thickness.isEnabled() is True
+
+
 def test_section_panel_zero_moment_shows_no_flex_demand_without_chapon_error():
     _app()
     panel = SectionCheckPanel()
@@ -238,6 +263,8 @@ def test_section_panel_imports_old_rows_without_double_web_fields():
 
     assert panel._row_double_web_enabled(0) is False
     assert panel._row_double_web_offset_mm(0) is None
+    assert panel.chk_frame_reinforcement.isChecked() is False
+    assert panel.cmb_frame_reinforcement_thickness.currentData() == "1/4"
 
 
 def test_section_panel_export_import_preserves_double_web_row_state():
@@ -254,6 +281,89 @@ def test_section_panel_export_import_preserves_double_web_row_state():
     assert state["rows"][0]["double_web_inner_face_offset_mm"] == 20.0
     assert restored._row_double_web_enabled(0) is True
     assert restored._row_double_web_offset_mm(0) == 20.0
+
+
+def test_section_panel_export_import_preserves_frame_reinforcement_state():
+    _app()
+    panel = SectionCheckPanel()
+    panel.chk_frame_reinforcement.setChecked(True)
+    idx = panel.cmb_frame_reinforcement_thickness.findData("3/8")
+    assert idx >= 0
+    panel.cmb_frame_reinforcement_thickness.setCurrentIndex(idx)
+
+    state = panel.export_state()
+    restored = SectionCheckPanel()
+    restored.import_state(state)
+
+    assert state["frame_reinforcement_enabled"] is True
+    assert state["frame_reinforcement_thickness_in"] == "3/8"
+    assert "inner_web_enabled" not in state
+    assert restored.chk_frame_reinforcement.isChecked() is True
+    assert restored.cmb_frame_reinforcement_thickness.currentData() == "3/8"
+
+
+def test_section_panel_import_accepts_legacy_inner_web_state():
+    _app()
+    panel = SectionCheckPanel()
+
+    panel.import_state({"inner_web_enabled": True, "inner_web_thickness_in": "3/8", "rows": []})
+
+    assert panel.chk_frame_reinforcement.isChecked() is True
+    assert panel.cmb_frame_reinforcement_thickness.currentData() == "3/8"
+
+
+def test_section_panel_frame_reinforcement_duplicates_bastidor_vertical_rect_and_changes_properties():
+    _app()
+    panel = SectionCheckPanel()
+    panel.chk_bastidor_lateral.setChecked(True)
+    base = panel._make_section(450.0, 0.25)
+
+    panel.chk_frame_reinforcement.setChecked(True)
+    idx = panel.cmb_frame_reinforcement_thickness.findData("5/16")
+    assert idx >= 0
+    panel.cmb_frame_reinforcement_thickness.setCurrentIndex(idx)
+    reinforced = panel._make_section(450.0, 0.25)
+
+    assert hasattr(reinforced, "rects")
+    rects = [rect for rect in reinforced.rects if rect.label.endswith("refuerzo")]
+    bastidor_rects = [
+        rect
+        for rect in reinforced.rects
+        if rect.label.startswith("bastidor_") and rect.label.endswith("alma")
+    ]
+    assert len(rects) == 2
+    assert len(bastidor_rects) == 2
+    t = float(rects[0].b_mm)
+    assert rects[0].h_mm == bastidor_rects[0].h_mm == panel.n_bastidor_lateral_altura.value()
+    assert rects[1].h_mm == bastidor_rects[1].h_mm == panel.n_bastidor_lateral_altura.value()
+    assert rects[0].x0_mm + rects[0].b_mm / 2.0 == -BASTIDOR_LATERAL_DISTANCIA_MM + FRAME_REINFORCEMENT_OFFSET_FROM_BASTIDOR_MM
+    assert rects[1].x0_mm + rects[1].b_mm / 2.0 == BASTIDOR_LATERAL_DISTANCIA_MM - FRAME_REINFORCEMENT_OFFSET_FROM_BASTIDOR_MM
+    assert t == rects[1].b_mm
+    assert reinforced.props_mm()["Ix_mm4"] > base.props_mm()["Ix_mm4"]
+
+
+def test_section_panel_frame_reinforcement_updates_fs_and_export_payload():
+    _app()
+    panel = SectionCheckPanel()
+    panel.set_moment_provider(lambda _x_mm: 125000.0)
+    panel.chk_bastidor_lateral.setChecked(True)
+    _load_valid_row(panel)
+    panel._recompute_all()
+    base_jx = float(_cell(panel, 0, panel.COL_JX))
+    base_fs = float(_cell(panel, 0, panel.COL_FS))
+
+    panel.chk_frame_reinforcement.setChecked(True)
+    panel._recompute_all()
+    reinforced_jx = float(_cell(panel, 0, panel.COL_JX))
+    reinforced_fs = float(_cell(panel, 0, panel.COL_FS))
+    cards = panel._collect_section_export_cards()
+
+    assert reinforced_jx > base_jx
+    assert reinforced_fs > base_fs
+    assert cards[0]["frame_reinforcement_enabled"] is True
+    assert cards[0]["frame_reinforcement_offset_from_bastidor_mm"] == 40.0
+    assert cards[0]["frame_reinforcement_thickness_in"] == "1/4"
+    assert cards[0]["web_configuration_label"] == "Simple + refuerzo de bastidor"
 
 
 def test_section_panel_export_import_preserves_floor_width_without_structural_flag():

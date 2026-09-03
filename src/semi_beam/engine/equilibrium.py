@@ -30,8 +30,8 @@ def _sum_known_contributions(case: BeamCase) -> Tuple[float, float, float, List[
       M0_known_internal: suma de momentos respecto a x=0 (sin q faltante, sin tándem/direccional/hitch/kingpin)
       M_point_total: suma de momentos puntuales ingresados manualmente (solo para info)
     Incluye:
-      - point_forces conocidos (aplicando la regla P fuera de [0,L] -> momento en borde, sin fuerza)
-      - dist_loads conocidos (recortados a la viga)
+      - point_forces conocidos
+      - dist_loads conocidos, aun si quedan parcial o totalmente fuera de [0,L]
       - moments conocidos (M_user ya es interno CCW+)
     """
     L = float(case.beam.L_mm)
@@ -51,15 +51,15 @@ def _sum_known_contributions(case: BeamCase) -> Tuple[float, float, float, List[
         M0 += f * x
 
 
-    # Distribuidas conocidas
+    # Distribuidas conocidas: no se recortan al tramo visible.
     for dl in case.dist_loads:
-        clipped = _clip_dist_to_beam(L, float(dl.x0_mm), float(dl.Lq_mm))
-        if clipped is None:
-            notes.append(f'Distribuida ignorada (no intersecta viga): {dl.label} [{dl.x0_mm:g},{dl.x0_mm + dl.Lq_mm:g}]')
+        length = float(dl.Lq_mm)
+        if length <= 0.0:
+            notes.append(f'Distribuida ignorada (longitud inválida): {dl.label} Lq={length:g}')
             continue
-        x1, x2 = clipped
+        x1 = float(dl.x0_mm)
+        x2 = x1 + length
         w_up = to_internal_w_up(dl.label, float(dl.q_user))  # kg/mm (up+)
-        length = x2 - x1
         x_cent = 0.5 * (x1 + x2)
         F_res = w_up * length
         Fy += F_res

@@ -1,109 +1,104 @@
 Calculeitor (semi_beam)
 
-Aplicación de escritorio para cálculo estructural preliminar de vigas de carrocerías en:
+Aplicacion de escritorio para calculo estructural preliminar de vigas en:
 - Acoplado
 - Semirremolque
-- Bitren (primera especie)
+- Bitren
+- Calculo y verificacion
 
 Incluye:
-- Esquema de cuerpo libre y diagramas V(x), M(x) y deformada.
-- Inspección interactiva de V(x), M(x) y deformada con marcador local y caja fija de valores.
-- Resolución de equilibrio para q faltante y posición de tándem.
-- Pestaña "Cálculo y verificación" para reacciones de semirremolque y búsqueda de configuración.
-- Verificación de sección a flexión con materiales y tabla de secciones.
-- Guardado y carga de estudios `.sbeam`.
-- Exportación de imágenes JPG.
-- Exportación de memoria de cálculo en DOCX.
+- FBD, diagramas V(x), M(x) y deformada.
+- Verificacion de seccion a flexion.
+- Guardado/carga de estudios .sbeam.
+- Exportacion JPG y memoria DOCX.
 
-Uso de inspección de diagramas:
-- Resolver un caso.
-- Mover el mouse sobre V(x), M(x) o deformada.
-- Leer la posición X y magnitud local en la caja fija del eje activo.
-- El FBD no tiene hover.
-- El hover no modifica cálculos y no aparece en exportaciones JPG/DOCX.
-- No requiere dependencias nuevas.
+Pestanas
+- Acoplado, Semirremolque y Bitren usan el flujo principal de unidad.
+- Calculo y verificacion es una pestana independiente y conserva su flujo propio.
 
-Nota operativa:
-- El exportador principal genera DOCX. Si hace falta PDF, se puede convertir desde Word.
+Modos de carga en Acoplado/Semirremolque/Bitren
+1. Carga distribuida equivalente
+   - Modo historico/default.
+   - Usa configuracion de ejes y reacciones conocidas.
+   - Calcula q equivalente para cerrar equilibrio.
+   - Estudios .sbeam antiguos cargan en este modo.
 
-Requisitos
-- Windows 11
-- Python 3.11 o superior
-- Dependencias de runtime en `requirements.txt`
-- Herramientas opcionales de pruebas/armado en `requirements-dev.txt`
+2. Cargas reales
+   - El usuario ingresa las cargas en la tabla Cargas.
+   - No hay plantillas ni subcasos de contenedor, maquinaria o carga concentrada.
+   - Tipos: Puntual, Distribuida, Momento.
+   - No genera q equivalente automatica.
+   - Calcula reacciones, FBD, V(x), M(x) y verificacion con las cargas reales.
+   - En Bitren conserva Rp2.
 
-Dependencias
-- Ejecución: PySide6, matplotlib, numpy, reportlab y python-docx.
-- Pruebas: pytest.
-- Armado del ejecutable: pyinstaller.
+Tabla Cargas
+- Columnas: Tipo, Magnitud, Posicion / centro [mm], Longitud [mm].
+- Puntual: magnitud y posicion.
+- Distribuida: magnitud total, centro y longitud.
+- Momento: magnitud y posicion.
+- Longitud aplica a distribuidas.
 
-Estructura clave
-- `scripts/run_app.py` (arranque de la app)
-- `scripts/smoke_check.py` (prueba mínima sin abrir UI)
-- `scripts/prepare_release_assets.py` (genera icono/template si faltan)
-- `src/semi_beam/...` (paquete principal)
-- `src/semi_beam/view/diagram_hover.py` (interacción hover Matplotlib en la capa view)
-- `src/semi_beam/view/renderer_vm.py` (expone Line2D para inspección sin alterar cálculo)
-- `src/semi_beam/ui/main_window.py` (wiring de la UI principal)
-- `assets/branding/calculeitor.ico` (icono)
-- `assets/templates/memoria_base.docx` (template de memoria)
-- `calculeitor.spec` (ejecutable PyInstaller de un solo archivo)
+Reglas importantes
+- En algunos casos L es largo carrozable, no el limite estructural total.
+- x > L puede ser valido si pertenece fisicamente al sistema.
+- x < 0 no debe aceptarse.
+- Calculo y verificacion tambien acepta x > L cuando corresponda, pero no tiene el modo Cargas reales.
 
-Comandos (PowerShell)
+Semirremolque 1+1+1
+- Tres ejes individuales.
+- 10500 kg por eje.
+- Total bruto 31500 kg.
+- Se resta direccional 1300 kg y dos ejes 2200 kg.
+- Reaccion total resultante 28000 kg.
+- Separacion entre ejes 2450 mm.
 
-1) Instalar dependencias
+Levante de eje
+- Direccional: carga automatica de 1300 kg.
+- 2 o 3 ejes: primer eje con carga automatica de 1200 kg.
+- No modifica x_t geometrico.
+- Recalcula reacciones para cerrar V/M.
+- En Bitren considera Rp2.
+
+Offset direccional
+- Se ingresa desde el segundo eje.
+- Rango permitido: 2400 mm a 4000 mm.
+
+UI
+- Cargas esta en un CollapsibleBox.
+- Las pestanas superiores quedan visibles/fijas.
+- Bastidor lateral estructural no es seleccionable: el bastidor activo es estructural.
+- Deformada esta siempre activa y no aparece como bloque visible de opcion.
+- Bitren no muestra opciones de direccional.
+- Acerca de Calculeitor es un boton unico en la barra superior, alineado a la derecha.
+
+Comandos PowerShell
+
+Ejecutar app:
 ```powershell
-python -m venv .venv
-.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m semi_beam
 ```
 
-Para correr pruebas o armar el ejecutable:
+Tests:
 ```powershell
-pip install -r requirements-dev.txt
+.\.venv\Scripts\python.exe -m pytest -p no:cacheprovider -q
 ```
 
-2) Correr la app
+Smoke check:
 ```powershell
-python scripts/run_app.py
+.\.venv\Scripts\python.exe scripts\smoke_check.py
 ```
 
-Opcional:
+Build:
 ```powershell
-python -m semi_beam
+.\.venv\Scripts\python.exe -m PyInstaller --noconfirm --clean .\calculeitor.spec
 ```
 
-3) Ejecutar smoke_check
+RTK:
 ```powershell
-python scripts/smoke_check.py
-```
-Genera en carpeta temporal:
-- `FBD.jpg`
-- `V.jpg`
-- `M.jpg`
-- `Memoria - Smoke.docx`
-
-4) Correr pruebas
-```powershell
-pytest -q
+$env:Path = "$PWD\.venv\Scripts;$env:Path"
+rtk pytest -p no:cacheprovider
 ```
 
-5) Generar EXE de un solo archivo con PyInstaller
-```powershell
-python scripts/prepare_release_assets.py
-pyinstaller --clean calculeitor.spec
-```
-Salida esperada:
-- `dist\Calculeitor.exe`
+Si RTK responde Pytest: No tests collected, usar python -m pytest como validacion principal.
 
-Notas de build
-- El `.spec` empaqueta:
-  - `src/semi_beam/data/materials_kgcm2.txt`
-  - `assets/templates/memoria_base.docx`
-  - `assets/branding/calculeitor.ico`
-- Nombre de producto/EXE: `Calculeitor`.
-- Los artefactos generados (`dist/`, `build/`, `.tmp/`, logs, memorias exportadas y estudios `.sbeam`) quedan fuera de Git por `.gitignore`.
-
-Licencia
-- Uso interno / privado.
+Ver README.md para documentacion completa.

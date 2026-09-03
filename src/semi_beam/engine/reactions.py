@@ -53,13 +53,12 @@ def _as_internal_loads(L: float, loads: Sequence[ReactionLoad]) -> _InternalLoad
             continue
 
         if isinstance(load, DistUniform):
-            clipped = _clip_dist_to_beam(float(L), float(load.x0_mm), float(load.Lq_mm))
-            if clipped is None:
-                notes.append(f'Distribuida ignorada: "{load.label}" no intersecta la viga o tiene longitud inválida.')
+            length = float(load.Lq_mm)
+            if length <= 0.0:
+                notes.append(f'Distribuida ignorada: "{load.label}" tiene longitud inválida.')
                 continue
-            x1, x2 = clipped
-            if abs(x1 - float(load.x0_mm)) > 1e-9 or abs(x2 - (float(load.x0_mm) + float(load.Lq_mm))) > 1e-9:
-                notes.append(f'Distribuida "{load.label}" recortada a [{x1:g}, {x2:g}] mm para el solver.')
+            x1 = float(load.x0_mm)
+            x2 = x1 + length
             dist_loads.append((x1, x2, float(to_internal_w_up(load.label, load.q_user))))
             continue
 
@@ -192,8 +191,8 @@ def solve_reactions_2support(
     x_a, x_b = float(supports[0]), float(supports[1])
     if L_v <= 0.0:
         raise ValueError("La longitud de la viga debe ser mayor a 0.")
-    if not (0.0 <= x_a <= L_v and 0.0 <= x_b <= L_v):
-        raise ValueError("Las posiciones de los apoyos deben estar dentro de [0, L].")
+    if x_a < 0.0 or x_b < 0.0:
+        raise ValueError("Las posiciones de los apoyos no pueden ser negativas.")
     if x_b <= x_a:
         raise ValueError("Se requiere x_A < x_B para el caso de 2 apoyos.")
 
@@ -231,8 +230,8 @@ def solve_reactions_3support(
     xt = float(x_t)
     if L_v <= 0.0:
         raise ValueError("La longitud de la viga debe ser mayor a 0.")
-    if not (0.0 <= xk <= L_v and 0.0 <= xd <= L_v and 0.0 <= xt <= L_v):
-        raise ValueError("Las posiciones de los apoyos deben estar dentro de [0, L].")
+    if xk < 0.0 or xd < 0.0 or xt < 0.0:
+        raise ValueError("Las posiciones de los apoyos no pueden ser negativas.")
     if not (xk < xd < xt):
         raise ValueError("Se requiere x_k < x_d < x_t para el caso de 3 apoyos.")
 

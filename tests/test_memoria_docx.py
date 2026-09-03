@@ -275,6 +275,39 @@ def test_docx_renders_double_web_configuration(tmp_path):
     assert "Espesor de cada alma" in text
 
 
+def test_docx_renders_frame_reinforcement_configuration(tmp_path):
+    out = tmp_path / "memoria.docx"
+    export_memoria_docx(
+        out,
+        verification={
+            "fs_required": 1.5,
+            "n_beams": 1,
+            "cards": [
+                {
+                    "sec": "1",
+                    "fs_text": "2.31",
+                    "ok": True,
+                    "web_configuration_label": "Simple + refuerzo de bastidor",
+                    "double_web_enabled": False,
+                    "frame_reinforcement_enabled": True,
+                    "frame_reinforcement_offset_from_bastidor_mm": 40.0,
+                    "frame_reinforcement_thickness_in": "1/4",
+                    "frame_reinforcement_thickness_mm": 6.35,
+                    "bastidor_lateral_included": True,
+                    "bastidor_lateral_height_mm": 170.0,
+                }
+            ],
+        },
+    )
+
+    text = _document_text(out)
+
+    assert "Refuerzo de bastidor" in text
+    assert "1/4" in text
+    assert "1210" in text
+    assert "Alma interior" not in text
+
+
 def test_docx_renders_double_web_error_without_zero_fs(tmp_path):
     out = tmp_path / "memoria.docx"
     export_memoria_docx(

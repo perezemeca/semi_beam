@@ -7,7 +7,7 @@ import tempfile
 from datetime import datetime
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional, Tuple, Dict, Any
+from typing import List, Optional, Tuple, Dict, Any, Sequence
 
 import matplotlib
 matplotlib.use("QtAgg")
@@ -15,14 +15,14 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QWheelEvent, QIcon, QColor, QBrush
+from PySide6.QtGui import QWheelEvent, QIcon, QColor, QBrush, QImage, QPainter
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
     QLabel, QDoubleSpinBox, QPushButton, QTableWidget, QTableWidgetItem,
     QSizePolicy, QSplitter, QScrollArea, QTabWidget, QMessageBox, QFileDialog,
     QToolButton, QFrame, QComboBox, QDialog, QCheckBox, QGroupBox, QAbstractItemView
 )
-from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 
 # Delegados numéricos (solo números / admite vacío)
 from semi_beam.ui.numeric_delegate import (
@@ -49,7 +49,7 @@ from semi_beam.domain.unknowns import UnknownUniformLoad
 from semi_beam.domain.cases import BeamCase
 from semi_beam.domain.results import EquilibriumResult
 from semi_beam.engine.equilibrium import solve_equilibrium
-from semi_beam.engine.reactions import ReactionsResult, solve_reactions_2support
+from semi_beam.engine.reactions import ReactionsResult, solve_reactions_2support, solve_reactions_3support
 from semi_beam.engine.deflection import compute_total_deflection
 from semi_beam.engine.diagrams import build_V_M
 from semi_beam.view.diagram_hover import DiagramHoverInspector, HoverCurve
@@ -69,6 +69,80 @@ from semi_beam.ui.section_check_panel import SectionCheckPanel
 from semi_beam.ui.memoria_header_dialog import MemoriaHeaderDialog
 from semi_beam.ui.reactions_tab import SemiTrailerReactionsTab
 from semi_beam.ui.number_parsing import normalize_decimal_text, try_parse_user_float
+
+
+# ============================================================
+# Canvas
+# ============================================================
+class ResizeThrottledFigureCanvas(FigureCanvasQTAgg):
+    """Throttle Agg resize draws while painting the last valid buffer."""
+
+    RESIZE_DRAW_INTERVAL_MS = 200
+
+    def __init__(self, figure):
+        self._handling_resize_event = False
+        self._resize_draw_pending = False
+        self._resize_snapshot: Optional[QImage] = None
+        super().__init__(figure)
+        self._resize_draw_timer = QTimer(self)
+        self._resize_draw_timer.setSingleShot(True)
+        self._resize_draw_timer.timeout.connect(self._flush_resize_draw)
+
+    def resizeEvent(self, event):
+        if self._resize_snapshot is None:
+            try:
+                buffer = memoryview(self.buffer_rgba())
+                snapshot = QImage(
+                    buffer,
+                    buffer.shape[1],
+                    buffer.shape[0],
+                    QImage.Format_RGBA8888,
+                ).copy()
+                snapshot.setDevicePixelRatio(self.device_pixel_ratio)
+                self._resize_snapshot = snapshot
+            except AttributeError:
+                pass
+        self._handling_resize_event = True
+        try:
+            super().resizeEvent(event)
+        finally:
+            self._handling_resize_event = False
+
+    def paintEvent(self, event):
+        if self._resize_snapshot is not None:
+            painter = QPainter(self)
+            try:
+                painter.drawImage(self.rect(), self._resize_snapshot)
+            finally:
+                painter.end()
+            return
+        super().paintEvent(event)
+
+    def draw(self):
+        super().draw()
+        self._resize_snapshot = None
+
+    def draw_idle(self):
+        timer = getattr(self, "_resize_draw_timer", None)
+        if self._handling_resize_event and timer is not None:
+            if timer.isActive():
+                self._resize_draw_pending = True
+                return
+            self._resize_draw_pending = False
+            super().draw_idle()
+            timer.start(self.RESIZE_DRAW_INTERVAL_MS)
+            return
+        if timer is not None and timer.isActive():
+            timer.stop()
+        self._resize_draw_pending = False
+        super().draw_idle()
+
+    def _flush_resize_draw(self):
+        if not self._resize_draw_pending:
+            return
+        self._resize_draw_pending = False
+        super().draw_idle()
+        self._resize_draw_timer.start(self.RESIZE_DRAW_INTERVAL_MS)
 
 
 # ============================================================
@@ -231,6 +305,41 @@ class SessionCache:
     memoria_header: dict = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class ReactionLimitUsage:
+    label: str
+    reaction_kg: float
+    limit_kg: Optional[float]
+    percent: Optional[float]
+    exceeded: bool
+
+    @property
+    def status(self) -> str:
+        return "excedido" if self.exceeded else "admisible"
+
+
+@dataclass(frozen=True)
+class RealLoadCandidate:
+    x_t_mm: float
+    x_d_mm: Optional[float]
+    reaction_result: ReactionsResult
+    support_points: List[PointForce]
+    lift_load: Optional[PointForce]
+    max_usage_pct: float
+    feasible: bool
+
+
+@dataclass(frozen=True)
+class RealLoadSearchResult:
+    candidate: RealLoadCandidate
+    x_min_mm: float
+    x_max_mm: float
+    step_mm: float
+    feasible_count: int
+    candidate_count: int
+    limiting_label: Optional[str]
+
+
 # ============================================================
 # Un TAB completo (estado independiente)
 # ============================================================
@@ -241,6 +350,8 @@ class UnitTab(QWidget):
     COL_LEN = 3
 
     LOAD_TYPES = ["Puntual", "Distribuida", "Momento"]
+    LOAD_MODE_EQUIVALENT = "Carga distribuida equivalente"
+    LOAD_MODE_REAL = "Cargas reales"
 
     def __init__(self, title: str, *, is_bitren: bool = False, is_acoplado: bool = False):
         super().__init__()
@@ -287,6 +398,8 @@ class UnitTab(QWidget):
         self.cmb_semi_tipo.setVisible(not self.is_acoplado and not self.is_bitren)  # solo semirremolque
 
         self.cmb_config = QComboBox()
+        self.cmb_load_mode = QComboBox()
+        self.cmb_load_mode.addItems([self.LOAD_MODE_EQUIVALENT, self.LOAD_MODE_REAL])
         self.chk_axis_lift = QCheckBox("Levante de eje")
         self.chk_axis_lift.setToolTip(
             "Agrega una carga puntual descendente automática para evaluar esfuerzos. "
@@ -302,13 +415,16 @@ class UnitTab(QWidget):
 
         self.R_front_or_kp = FlexibleDoubleSpinBox()
         self._setup_motor_spin(self.R_front_or_kp, minv=0.0, maxv=1e12, decimals=2, step=50.0)
+        self.R_front_or_kp.setToolTip("En Cargas reales se usa como limite admisible; en carga equivalente se usa como reaccion de entrada.")
 
         self.Rt = FlexibleDoubleSpinBox()
         self._setup_motor_spin(self.Rt, minv=0.0, maxv=1e12, decimals=2, step=50.0)
+        self.Rt.setToolTip("En Cargas reales se usa como limite admisible; en carga equivalente se usa como reaccion de entrada.")
 
         # Direccional (solo semirremolque)
         self.Rd = FlexibleDoubleSpinBox()
         self._setup_motor_spin(self.Rd, minv=-1e12, maxv=1e12, decimals=2, step=50.0)
+        self.Rd.setToolTip("En Cargas reales se usa como limite admisible de direccional; en carga equivalente se usa como reaccion de entrada.")
 
         self.dir_offset = FlexibleDoubleSpinBox()
         self._setup_motor_spin(
@@ -329,6 +445,7 @@ class UnitTab(QWidget):
 
         self.Rp2 = FlexibleDoubleSpinBox()
         self._setup_motor_spin(self.Rp2, minv=0.0, maxv=1e12, decimals=2, step=50.0)
+        self.Rp2.setToolTip("En Bitren se conserva como carga conocida descendente y se muestra contra el limite ingresado.")
 
         # Labels según tab
         if self.is_acoplado:
@@ -345,6 +462,7 @@ class UnitTab(QWidget):
             form.addRow("Tipo de semirremolque:", self.cmb_semi_tipo)
 
         form.addRow("Configuración de ejes:", self.cmb_config)
+        form.addRow("Modo de carga:", self.cmb_load_mode)
         form.addRow("Simulación de levante:", self.chk_axis_lift)
 
         form.addRow(lbl_x, self.x_front_or_kp)
@@ -433,6 +551,13 @@ class UnitTab(QWidget):
         self.note_label.setWordWrap(True)
         self.note_label.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
         n_v.addWidget(self.note_label)
+
+        self.lbl_reaction_limits = QLabel("")
+        self.lbl_reaction_limits.setWordWrap(True)
+        self.lbl_reaction_limits.setTextFormat(Qt.RichText)
+        self.lbl_reaction_limits.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
+        self.lbl_reaction_limits.setVisible(False)
+        n_v.addWidget(self.lbl_reaction_limits)
 
         root.addStretch(1)
 
@@ -603,6 +728,39 @@ class UnitTab(QWidget):
             self.Rp2.setEnabled(False)
         self._apply_axis_lift_ui()
 
+    def reaction_limit_values(self) -> Dict[str, Optional[float]]:
+        limits: Dict[str, Optional[float]] = {
+            "Rp1": _spin_value_or_none(self.R_front_or_kp),
+            "Rt": _spin_value_or_none(self.Rt),
+        }
+        if self._config_uses_directional():
+            limits["Rd"] = _spin_value_or_none(self.Rd)
+        if self.is_bitren:
+            limits["Rp2"] = _spin_value_or_none(self.Rp2)
+        return limits
+
+    def set_reaction_limit_summary(self, usages: Sequence[ReactionLimitUsage]) -> None:
+        if not usages:
+            self.lbl_reaction_limits.clear()
+            self.lbl_reaction_limits.setVisible(False)
+            return
+        lines = ["<b>Uso de límites admisibles (Cargas reales):</b>"]
+        for usage in usages:
+            if usage.limit_kg is None or usage.limit_kg <= 0.0 or usage.percent is None:
+                lines.append(
+                    f"{usage.label}: {_fmt_plain(usage.reaction_kg, 1)} kg / límite no definido"
+                )
+                continue
+            color = "#B00020" if usage.exceeded else "#0A7F2E"
+            lines.append(
+                f"{usage.label}: {_fmt_plain(usage.reaction_kg, 1)} kg / "
+                f"límite {_fmt_plain(usage.limit_kg, 0)} kg - "
+                f"<span style=\"color:{color}; font-weight:600;\">"
+                f"{_fmt_plain(usage.percent, 1)} % del límite</span>"
+            )
+        self.lbl_reaction_limits.setText("<br>".join(lines))
+        self.lbl_reaction_limits.setVisible(True)
+
     def _validate_required_inputs(self) -> List[str]:
         errors: List[str] = []
 
@@ -750,6 +908,7 @@ class UnitTab(QWidget):
         self._populate_configs()
         self._clear_motor_inputs()
         self.set_note("(sin notas)")
+        self.set_reaction_limit_summary([])
         self.clear_deflection_summary()
         self.set_view_mode("inputs")
         self.set_cache(None)
@@ -868,8 +1027,6 @@ class UnitTab(QWidget):
         errors: List[str] = []
         dist_rows: List[int] = []
         dist_intervals: List[Tuple[float, float]] = []
-        Lc = _spin_value_or_none(self.Lc)
-        beam_L = float(Lc) if Lc is not None else None
         p_count = 0
         d_count = 0
         m_count = 0
@@ -883,8 +1040,8 @@ class UnitTab(QWidget):
             if mag is None or pos is None:
                 errors.append(f"Cargas fila {row + 1}: complete magnitud y posición.")
                 continue
-            if beam_L is not None and not (0.0 <= float(pos) <= beam_L):
-                errors.append(f"Cargas fila {row + 1}: la posición debe estar dentro de [0, L].")
+            if float(pos) < 0.0:
+                errors.append(f"Cargas fila {row + 1}: la posición no puede ser negativa.")
                 continue
 
             if load_type == "Puntual":
@@ -901,9 +1058,6 @@ class UnitTab(QWidget):
                     x1, x2 = dist_interval(float(pos), float(length))
                 except Exception as exc:
                     errors.append(f"Cargas fila {row + 1}: {exc}")
-                    continue
-                if beam_L is not None and (x1 < 0.0 or x2 > beam_L):
-                    errors.append(f"Cargas fila {row + 1}: el tramo distribuido debe quedar dentro de [0, L].")
                     continue
                 d_count += 1
                 dist_rows.append(row)
@@ -966,6 +1120,15 @@ class UnitTab(QWidget):
     def view_mode(self) -> str:
         return self._view_mode
 
+    def load_mode(self) -> str:
+        text = self.cmb_load_mode.currentText()
+        if text == self.LOAD_MODE_REAL:
+            return self.LOAD_MODE_REAL
+        return self.LOAD_MODE_EQUIVALENT
+
+    def uses_real_loads_mode(self) -> bool:
+        return self.load_mode() == self.LOAD_MODE_REAL
+
     def deflection_enabled(self) -> bool:
         self.chk_show_deflection.setChecked(True)
         return True
@@ -1027,6 +1190,7 @@ class UnitTab(QWidget):
         return {
             "semi_tipo": self.cmb_semi_tipo.currentText() if hasattr(self, "cmb_semi_tipo") else None,
             "config_text": self.cmb_config.currentText(),
+            "load_mode": self.load_mode(),
             "motor_inputs": {
                 "Lc": _spin_text(self.Lc),
                 "x_front_or_kp": _spin_text(self.x_front_or_kp),
@@ -1124,6 +1288,7 @@ class UnitTab(QWidget):
             self._populate_configs()
 
         _set_combo_text(self.cmb_config, state.get("config_text"))
+        _set_combo_text(self.cmb_load_mode, state.get("load_mode", self.LOAD_MODE_EQUIVALENT))
 
         motor_inputs = state.get("motor_inputs")
         if isinstance(motor_inputs, dict):
@@ -1154,6 +1319,8 @@ class UnitTab(QWidget):
 # MAIN WINDOW
 # ============================================================
 class FBDApp(QMainWindow):
+    RESIZE_REPLOT_DELAY_MS = 250
+
     def __init__(self):
         super().__init__()
         self._current_study_path: Optional[str] = None
@@ -1205,7 +1372,7 @@ class FBDApp(QMainWindow):
         self.ax_V = self.fig.add_subplot(gs[1, 0], sharex=self.ax_fbd)
         self.ax_M = self.fig.add_subplot(gs[2, 0], sharex=self.ax_fbd)
         self.ax_defl = self.fig.add_subplot(gs[3, 0], sharex=self.ax_fbd)
-        self.canvas = FigureCanvas(self.fig)
+        self.canvas = ResizeThrottledFigureCanvas(self.fig)
         self.canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.canvas.setMinimumHeight(980)
 
@@ -1239,7 +1406,9 @@ class FBDApp(QMainWindow):
         # timers / signals
         self._redraw_timer = QTimer(self)
         self._redraw_timer.setSingleShot(True)
-        self._redraw_timer.timeout.connect(self._replot_active_tab)
+        self._scheduled_replot_kind = "full"
+        self._scheduled_replot_tab: Optional[UnitTab] = None
+        self._redraw_timer.timeout.connect(self._flush_scheduled_replot)
 
         self.canvas.installEventFilter(self)
         for tab in [self.tab_acoplado, self.tab_semi, self.tab_bitren]:
@@ -1265,10 +1434,11 @@ class FBDApp(QMainWindow):
             tab.cmb_config.currentIndexChanged.connect(lambda *_, t=tab: self._schedule_replot_tab(t, reset_solution=True))
             if hasattr(tab, "cmb_semi_tipo"):
                 tab.cmb_semi_tipo.currentIndexChanged.connect(lambda *_, t=tab: self._schedule_replot_tab(t, reset_solution=True))
+            tab.cmb_load_mode.currentIndexChanged.connect(lambda *_, t=tab: self._schedule_replot_tab(t, reset_solution=True))
 
             tab.tbl.cellChanged.connect(lambda *_, t=tab: self._schedule_replot_tab(t, reset_solution=True))
             tab.chk_axis_lift.toggled.connect(lambda *_, t=tab: self._schedule_axis_lift_replot(t))
-            tab.section_panel.inertia_inputs_changed.connect(lambda t=tab: self._schedule_replot_tab(t, reset_solution=False))
+            tab.section_panel.inertia_inputs_changed.connect(lambda t=tab: self._schedule_deflection_replot_tab(t))
 
         self.tab_reactions.plot_data_changed.connect(self._schedule_active_replot)
         self.tab_reactions.section_panel.inertia_inputs_changed.connect(self._schedule_active_replot)
@@ -1286,7 +1456,10 @@ class FBDApp(QMainWindow):
         self._resize_timer = QTimer(self)
         self._resize_timer.setSingleShot(True)
         self._resize_timer.timeout.connect(self._replot_active_tab)
-        self.canvas.mpl_connect("resize_event", lambda evt: self._resize_timer.start(80))
+        self.canvas.mpl_connect(
+            "resize_event",
+            lambda _event: self._resize_timer.start(self.RESIZE_REPLOT_DELAY_MS),
+        )
 
     def _show_about(self) -> None:
         QMessageBox.about(
@@ -1433,7 +1606,10 @@ class FBDApp(QMainWindow):
             QMessageBox.critical(self, "Cargar estudio", f"No se pudo cargar el estudio: {e}")
 
     def _schedule_active_replot(self):
-        self._redraw_timer.start(60)
+        if self.active_tab() is self.tab_reactions:
+            self._scheduled_replot_kind = "full"
+            self._scheduled_replot_tab = None
+            self._redraw_timer.start(60)
 
     def eventFilter(self, obj, event):
         if obj is self.canvas and isinstance(event, QWheelEvent):
@@ -1462,7 +1638,30 @@ class FBDApp(QMainWindow):
             tab.set_cache(None)
             tab.set_diag(None)
         if tab is self.active_tab():
+            self._scheduled_replot_kind = "full"
+            self._scheduled_replot_tab = None
             self._redraw_timer.start(90)
+
+    def _schedule_deflection_replot_tab(self, tab: UnitTab):
+        if tab is not self.active_tab():
+            return
+        # The final resize replot already consumes the latest section geometry.
+        if self._resize_timer.isActive():
+            return
+        if self._redraw_timer.isActive() and self._scheduled_replot_kind == "full":
+            return
+        self._scheduled_replot_kind = "deflection"
+        self._scheduled_replot_tab = tab
+        self._redraw_timer.start(90)
+
+    def _flush_scheduled_replot(self):
+        kind = self._scheduled_replot_kind
+        tab = self._scheduled_replot_tab
+        self._scheduled_replot_kind = "full"
+        self._scheduled_replot_tab = None
+        if kind == "deflection" and tab is not None and self._refresh_deflection_only(tab):
+            return
+        self._replot_active_tab()
 
     def _schedule_axis_lift_replot(self, tab: UnitTab):
         keep_solved = tab.view_mode() == "solved"
@@ -1470,6 +1669,8 @@ class FBDApp(QMainWindow):
         tab.set_diag(None)
         tab.set_view_mode("solved" if keep_solved else "inputs")
         if tab is self.active_tab():
+            self._scheduled_replot_kind = "full"
+            self._scheduled_replot_tab = None
             self._redraw_timer.start(90)
 
     def _current_style(self) -> RenderStyle:
@@ -1574,7 +1775,16 @@ class FBDApp(QMainWindow):
             return base_result, None, None
 
         external_points = list(case.point_forces) + [lift_load]
-        final_loads = [*external_points, *base_result.solved_dist_loads, *base_result.solved_moments]
+        known_support_points: List[PointForce] = []
+        if tab.is_bitren and case.hitch is not None:
+            known_support_points.append(
+                PointForce(
+                    label=case.hitch.label,
+                    x_mm=float(case.hitch.x_mm),
+                    value_user=float(case.hitch.reaction_user),
+                )
+            )
+        final_loads = [*external_points, *known_support_points, *base_result.solved_dist_loads, *base_result.solved_moments]
 
         x_k = float(case.kingpin.x_mm)
         x_t = float(base_result.x_t_mm)
@@ -1597,11 +1807,320 @@ class FBDApp(QMainWindow):
             residual_Fy=float(reaction_result.Fy_total_residual),
             residual_M0=float(reaction_result.M0_residual),
             notes=notes,
-            solved_point_forces=[*external_points, *support_points],
+            solved_point_forces=[*external_points, *known_support_points, *support_points],
             solved_dist_loads=list(base_result.solved_dist_loads),
             solved_moments=list(base_result.solved_moments),
         )
         return final_result, lift_load, reaction_result
+
+    def _solve_real_loads_equilibrium_legacy_unused(
+        self,
+        *,
+        tab: UnitTab,
+        case: BeamCase,
+        geometry_result: EquilibriumResult,
+        beam_L_mm: float,
+    ) -> Tuple[EquilibriumResult, Optional[PointForce], Optional[ReactionsResult]]:
+        lift_load = tab.axis_lift_load(x_t_mm=float(geometry_result.x_t_mm), x_d_mm=geometry_result.x_d_mm)
+        external_points = list(case.point_forces)
+        if lift_load is not None:
+            external_points.append(lift_load)
+
+        known_support_points: List[PointForce] = []
+        if tab.is_bitren and case.hitch is not None:
+            known_support_points.append(
+                PointForce(
+                    label=case.hitch.label,
+                    x_mm=float(case.hitch.x_mm),
+                    value_user=float(case.hitch.reaction_user),
+                )
+            )
+
+        real_loads = [*external_points, *known_support_points, *case.dist_loads, *case.moments]
+        x_k = float(case.kingpin.x_mm)
+        x_t = float(geometry_result.x_t_mm)
+        x_d = None if geometry_result.x_d_mm is None else float(geometry_result.x_d_mm)
+
+        support_points: List[PointForce]
+        if case.directional is not None and x_d is not None and lift_load is None:
+            reaction_result = solve_reactions_3support(float(beam_L_mm), x_k, x_d, x_t, real_loads)
+            support_points = [
+                PointForce(label=case.kingpin.label, x_mm=x_k, value_user=float(reaction_result.reacciones["R_k"])),
+                PointForce(label=case.directional.label, x_mm=x_d, value_user=float(reaction_result.reacciones["R_d"])),
+                PointForce(label=case.tandem.label, x_mm=x_t, value_user=float(reaction_result.reacciones["R_t"])),
+            ]
+        else:
+            reaction_result = solve_reactions_2support(float(beam_L_mm), (x_k, x_t), real_loads)
+            support_points = [
+                PointForce(label=case.kingpin.label, x_mm=x_k, value_user=float(reaction_result.reacciones["R_A"])),
+                PointForce(label=case.tandem.label, x_mm=x_t, value_user=float(reaction_result.reacciones["R_B"])),
+            ]
+
+        notes = [
+            "Modo Cargas reales: no se generó carga distribuida equivalente automática.",
+            "LEGACY UNUSED: flujo anterior reemplazado por busqueda de x_t con cargas reales.",
+        ]
+        notes.extend(reaction_result.notes)
+
+        final_result = EquilibriumResult(
+            x_t_mm=x_t,
+            q_user_kg_per_mm=0.0,
+            x_d_mm=x_d,
+            residual_Fy=float(reaction_result.Fy_total_residual),
+            residual_M0=float(reaction_result.M0_residual),
+            notes=notes,
+            solved_point_forces=[*external_points, *known_support_points, *support_points],
+            solved_dist_loads=list(case.dist_loads),
+            solved_moments=list(case.moments),
+        )
+        return final_result, lift_load, reaction_result
+
+    def _real_load_search_range(self, *, tab: UnitTab, case: BeamCase, Lc: float) -> Tuple[float, float, float]:
+        step = 50.0
+        lo = float(Lc) / 2.0
+        hi = float(Lc) + 3000.0
+        x_k = float(case.kingpin.x_mm)
+        lo = max(lo, x_k + step)
+        if case.directional is not None:
+            lo = max(lo, x_k + float(case.directional.offset_mm) + step)
+        hi = max(lo, hi)
+        return lo, hi, step
+
+    def _iter_real_load_xt_candidates(self, lo: float, hi: float, step: float) -> List[float]:
+        values: List[float] = []
+        cur = float(lo)
+        while cur <= float(hi) + 1e-9:
+            values.append(round(cur, 8))
+            cur += float(step)
+        if not values or abs(values[-1] - float(hi)) > 1e-6:
+            values.append(float(hi))
+        return values
+
+    def _real_load_candidate_usage(
+        self,
+        *,
+        tab: UnitTab,
+        support_points: Sequence[PointForce],
+    ) -> Tuple[float, bool, Optional[str]]:
+        limits = tab.reaction_limit_values()
+        max_usage = 0.0
+        feasible = True
+        limiting_label: Optional[str] = None
+        for pf in support_points:
+            if pf.label == "Rp2":
+                continue
+            limit = limits.get(pf.label)
+            if limit is None or float(limit) <= 0.0:
+                continue
+            usage = abs(float(pf.value_user)) / float(limit) * 100.0
+            if usage > max_usage:
+                max_usage = usage
+                limiting_label = pf.label
+            if usage > 100.0 + 1e-9:
+                feasible = False
+        return max_usage, feasible, limiting_label
+
+    def _evaluate_real_load_candidate(
+        self,
+        *,
+        tab: UnitTab,
+        case: BeamCase,
+        beam_L_mm: float,
+        x_t: float,
+    ) -> RealLoadCandidate:
+        x_k = float(case.kingpin.x_mm)
+        x_d = None
+        if case.directional is not None:
+            x_d = float(x_t) - float(case.directional.offset_mm)
+            if not (x_k < x_d < float(x_t)):
+                raise ValueError("Geometria invalida para apoyo direccional.")
+
+        lift_load = tab.axis_lift_load(x_t_mm=float(x_t), x_d_mm=x_d)
+        external_points = list(case.point_forces)
+        if lift_load is not None:
+            external_points.append(lift_load)
+
+        known_support_points: List[PointForce] = []
+        if tab.is_bitren and case.hitch is not None:
+            known_support_points.append(
+                PointForce(
+                    label=case.hitch.label,
+                    x_mm=float(case.hitch.x_mm),
+                    value_user=float(case.hitch.reaction_user),
+                )
+            )
+
+        real_loads = [*external_points, *known_support_points, *case.dist_loads, *case.moments]
+        if case.directional is not None and x_d is not None and lift_load is None:
+            reaction_result = solve_reactions_3support(float(beam_L_mm), x_k, x_d, float(x_t), real_loads)
+            support_points = [
+                PointForce(label=case.kingpin.label, x_mm=x_k, value_user=float(reaction_result.reacciones["R_k"])),
+                PointForce(label=case.directional.label, x_mm=x_d, value_user=float(reaction_result.reacciones["R_d"])),
+                PointForce(label=case.tandem.label, x_mm=float(x_t), value_user=float(reaction_result.reacciones["R_t"])),
+            ]
+        else:
+            reaction_result = solve_reactions_2support(float(beam_L_mm), (x_k, float(x_t)), real_loads)
+            support_points = [
+                PointForce(label=case.kingpin.label, x_mm=x_k, value_user=float(reaction_result.reacciones["R_A"])),
+                PointForce(label=case.tandem.label, x_mm=float(x_t), value_user=float(reaction_result.reacciones["R_B"])),
+            ]
+
+        max_usage, feasible, _limiting = self._real_load_candidate_usage(tab=tab, support_points=support_points)
+        return RealLoadCandidate(
+            x_t_mm=float(x_t),
+            x_d_mm=x_d,
+            reaction_result=reaction_result,
+            support_points=[*external_points, *known_support_points, *support_points],
+            lift_load=lift_load,
+            max_usage_pct=max_usage,
+            feasible=feasible,
+        )
+
+    def _search_real_load_tandem_position(
+        self,
+        *,
+        tab: UnitTab,
+        case: BeamCase,
+        Lc: float,
+    ) -> RealLoadSearchResult:
+        lo, hi, step = self._real_load_search_range(tab=tab, case=case, Lc=float(Lc))
+        center = 0.5 * (float(lo) + float(hi))
+        beam_L_for_search = max(float(Lc), float(hi), 1.0)
+        for pf in case.point_forces:
+            beam_L_for_search = max(beam_L_for_search, float(pf.x_mm))
+        if case.hitch is not None:
+            beam_L_for_search = max(beam_L_for_search, float(case.hitch.x_mm), float(hi) + 2070.0)
+
+        candidates: List[RealLoadCandidate] = []
+        for x_t in self._iter_real_load_xt_candidates(lo, hi, step):
+            try:
+                candidates.append(
+                    self._evaluate_real_load_candidate(
+                        tab=tab,
+                        case=case,
+                        beam_L_mm=beam_L_for_search,
+                        x_t=float(x_t),
+                    )
+                )
+            except Exception:
+                continue
+
+        if not candidates:
+            raise ValueError("No se pudo evaluar ninguna posicion de tandem dentro del rango de busqueda.")
+
+        feasible = [cand for cand in candidates if cand.feasible]
+        pool = feasible if feasible else candidates
+        chosen = min(pool, key=lambda cand: (cand.max_usage_pct, abs(cand.x_t_mm - center)))
+        _usage, _feasible, limiting_label = self._real_load_candidate_usage(tab=tab, support_points=chosen.support_points)
+        return RealLoadSearchResult(
+            candidate=chosen,
+            x_min_mm=float(lo),
+            x_max_mm=float(hi),
+            step_mm=float(step),
+            feasible_count=len(feasible),
+            candidate_count=len(candidates),
+            limiting_label=limiting_label,
+        )
+
+    def _solve_real_loads_equilibrium(
+        self,
+        *,
+        tab: UnitTab,
+        case: BeamCase,
+        Lc: float,
+    ) -> Tuple[EquilibriumResult, Optional[PointForce], Optional[ReactionsResult]]:
+        search = self._search_real_load_tandem_position(tab=tab, case=case, Lc=float(Lc))
+        chosen = search.candidate
+        reaction_result = chosen.reaction_result
+
+        notes = [
+            "Modo Cargas reales: no se genero carga distribuida equivalente automatica.",
+            "Rp/Rt/Rd se interpretan como limites admisibles; no se usaron como reacciones impuestas.",
+            (
+                "Busqueda x_t: rango "
+                f"[{_fmt_plain(search.x_min_mm, 0)}, {_fmt_plain(search.x_max_mm, 0)}] mm, "
+                f"paso {_fmt_plain(search.step_mm, 0)} mm. "
+                "Criterio: menor porcentaje maximo de uso de limites; empate por posicion mas centrada."
+            ),
+            (
+                "Busqueda x_t: "
+                f"{search.feasible_count}/{search.candidate_count} posiciones admisibles."
+            ),
+        ]
+        if search.feasible_count <= 0:
+            notes.append(
+                "ATENCION: no se encontro posicion admisible; se muestra la mejor posicion no admisible "
+                "segun el criterio de menor uso maximo."
+            )
+        if search.limiting_label is not None:
+            notes.append(f"Limite gobernante en la posicion elegida: {search.limiting_label}.")
+        notes.extend(reaction_result.notes)
+
+        final_result = EquilibriumResult(
+            x_t_mm=chosen.x_t_mm,
+            q_user_kg_per_mm=0.0,
+            x_d_mm=chosen.x_d_mm,
+            residual_Fy=float(reaction_result.Fy_total_residual),
+            residual_M0=float(reaction_result.M0_residual),
+            notes=notes,
+            solved_point_forces=list(chosen.support_points),
+            solved_dist_loads=list(case.dist_loads),
+            solved_moments=list(case.moments),
+        )
+        return final_result, chosen.lift_load, reaction_result
+
+    def _reaction_limit_usages(
+        self,
+        tab: UnitTab,
+        points: Sequence[PointForce],
+    ) -> List[ReactionLimitUsage]:
+        limits = tab.reaction_limit_values()
+        reactions = {pf.label: float(pf.value_user) for pf in points if pf.label in limits}
+        ordered_labels = ["Rp1", "Rd", "Rt", "Rp2"]
+        usages: List[ReactionLimitUsage] = []
+        for label in ordered_labels:
+            if label not in reactions:
+                continue
+            limit = limits.get(label)
+            if limit is None or float(limit) <= 0.0:
+                usages.append(
+                    ReactionLimitUsage(
+                        label=label,
+                        reaction_kg=float(reactions[label]),
+                        limit_kg=None if limit is None else float(limit),
+                        percent=None,
+                        exceeded=False,
+                    )
+                )
+                continue
+            percent = abs(float(reactions[label])) / float(limit) * 100.0
+            usages.append(
+                ReactionLimitUsage(
+                    label=label,
+                    reaction_kg=float(reactions[label]),
+                    limit_kg=float(limit),
+                    percent=percent,
+                    exceeded=percent > 100.0,
+                )
+            )
+        return usages
+
+    def _reaction_limit_note_lines(self, usages: Sequence[ReactionLimitUsage]) -> List[str]:
+        if not usages:
+            return []
+        lines = ["Uso de límites admisibles (Cargas reales):"]
+        for usage in usages:
+            if usage.limit_kg is None or usage.limit_kg <= 0.0 or usage.percent is None:
+                lines.append(
+                    f"  {usage.label}: {_fmt_plain(usage.reaction_kg, 1)} kg / límite no definido"
+                )
+            else:
+                lines.append(
+                    f"  {usage.label}: {_fmt_plain(usage.reaction_kg, 1)} kg / "
+                    f"límite {_fmt_plain(usage.limit_kg, 0)} kg - "
+                    f"{_fmt_plain(usage.percent, 1)} % del límite ({usage.status})"
+                )
+        return lines
 
     def _compute_deflection_result(
         self,
@@ -1751,6 +2270,58 @@ class FBDApp(QMainWindow):
         if set_diag_on_tab is not None:
             set_diag_on_tab.set_diag(diag)
 
+    def _refresh_deflection_only(self, tab: UnitTab) -> bool:
+        """Refresh deflection when the active solved state and V/M artists are reusable."""
+        if tab is not self.active_tab():
+            return False
+        cache = tab.get_cache()
+        diag = tab.get_diag()
+        hover = self._diagram_hover
+        if cache is None or diag is None or hover is None:
+            return False
+
+        lines_by_axis = {curve.ax: curve.line for curve in hover.curves}
+        line_v = lines_by_axis.get(self.ax_V)
+        line_m = lines_by_axis.get(self.ax_M)
+        if line_v not in self.ax_V.lines or line_m not in self.ax_M.lines:
+            return False
+
+        xlim = _compute_x_view(cache.beam_plot.L_mm, cache.points, cache.dists, cache.moms)
+        enabled = tab.deflection_enabled()
+        try:
+            payload = self._compute_deflection_result(
+                diag=diag,
+                beam_L_mm=cache.beam_plot.L_mm,
+                supports=cache.deflection_supports,
+                params=tab.deflection_params(),
+                section_panel=tab.section_panel,
+            ) if enabled else None
+        except Exception:
+            return False
+
+        line_def = self._render_deflection_axis(
+            payload=payload,
+            xlim=xlim,
+            enabled=enabled,
+            summary_target=tab,
+            unavailable_text="Deformada desactivada.",
+        )
+        deflection_curve = None
+        if line_def is not None:
+            deflection_curve = HoverCurve(
+                ax=self.ax_defl,
+                line=line_def,
+                label="δ",
+                x_unit="mm",
+                y_unit="mm",
+                y_display_scale=1.0,
+                x_decimals=0,
+                y_decimals=1,
+            )
+        hover.replace_curve(self.ax_defl, deflection_curve)
+        self.canvas.draw_idle()
+        return True
+
     def _plot_reactions_tab(self, tab: SemiTrailerReactionsTab):
         state = tab.current_plot_state()
         if state is None:
@@ -1811,6 +2382,11 @@ class FBDApp(QMainWindow):
         self.canvas.draw_idle()
 
     def _replot_active_tab(self):
+        # An immediate full replot supersedes every queued full or partial request.
+        self._redraw_timer.stop()
+        self._scheduled_replot_kind = "full"
+        self._scheduled_replot_tab = None
+        self._resize_timer.stop()
         tab = self.active_tab()
         if tab is self.tab_reactions:
             self._plot_reactions_tab(self.tab_reactions)
@@ -1835,6 +2411,7 @@ class FBDApp(QMainWindow):
             tab.set_view_mode("inputs")
             tab.set_cache(cache)
             tab.set_note(note)
+            tab.set_reaction_limit_summary([])
             self._plot_triplet(cache, set_diag_on_tab=tab)
 
         except Exception as e:
@@ -1843,6 +2420,7 @@ class FBDApp(QMainWindow):
                 tab.set_view_mode("inputs")
                 tab.set_cache(None)
                 tab.set_note(msg.replace("VALIDACION:", "").strip())
+                tab.set_reaction_limit_summary([])
                 tab.set_diag(None)
                 if tab is self.active_tab():
                     self._clear_plot_canvas(msg.replace("VALIDACION:", "").strip())
@@ -1851,6 +2429,7 @@ class FBDApp(QMainWindow):
             tab.set_view_mode("inputs")
             tab.set_cache(None)
             tab.set_note(f"Error: {e}")
+            tab.set_reaction_limit_summary([])
             tab.set_diag(None)
 
     # Solve equilibrium
@@ -1863,6 +2442,7 @@ class FBDApp(QMainWindow):
                 if len(errors) > 12:
                     body += f"\n- ... y {len(errors) - 12} más."
                 QMessageBox.warning(self, "Validación de entradas", head + body)
+                tab.set_reaction_limit_summary([])
                 return
 
             beam_motor, pforces, dloads, moms, pnotes = tab.parse_inputs()
@@ -1903,7 +2483,20 @@ class FBDApp(QMainWindow):
                 unknown_uniform=unknown_q,
             )
 
-            res = solve_equilibrium(case)
+            if tab.uses_real_loads_mode():
+                res, lift_load, reaction_result = self._solve_real_loads_equilibrium(
+                    tab=tab,
+                    case=case,
+                    Lc=float(Lc),
+                )
+            else:
+                geometry_res = solve_equilibrium(case)
+                res, lift_load, reaction_result = self._solve_final_equilibrium_with_axis_lift(
+                    tab=tab,
+                    case=case,
+                    base_result=geometry_res,
+                    beam_L_mm=float(float(geometry_res.x_t_mm) + 2070.0 if tab.is_bitren else Lc),
+                )
 
             if tab.is_bitren:
                 L_viga_total = float(res.x_t_mm) + 2070.0
@@ -1911,12 +2504,6 @@ class FBDApp(QMainWindow):
                 L_viga_total = float(Lc)
 
             beam_plot = Beam(L_mm=L_viga_total)
-            res, lift_load, reaction_result = self._solve_final_equilibrium_with_axis_lift(
-                tab=tab,
-                case=case,
-                base_result=res,
-                beam_L_mm=float(beam_plot.L_mm),
-            )
 
             support_positions = [float(kingpin.x_mm), float(res.x_t_mm)]
             if res.x_d_mm is not None:
@@ -1953,11 +2540,16 @@ class FBDApp(QMainWindow):
 
             note_lines = [
                 f"[{tab.title}] Vista: solución (motor).",
+                f"Modo de carga = {tab.load_mode()}",
                 f"Largo carrozable = {_fmt_plain(Lc, 0)} mm",
                 f"Largo viga total = {_fmt_plain(L_viga_total, 0)} mm",
                 f"x_t = {_fmt_plain(float(res.x_t_mm), 0)} mm",
-                f"q calculada = {_fmt_plain(res.q_user_kg_per_mm, 6)} kg/mm (en [0, L_carrozable])",
             ]
+            if tab.uses_real_loads_mode():
+                note_lines.append("q equivalente automática = no aplicada")
+                note_lines.extend(res.notes)
+            else:
+                note_lines.append(f"q calculada = {_fmt_plain(res.q_user_kg_per_mm, 6)} kg/mm (en [0, L_carrozable])")
             if tab.is_bitren and x_rp2_abs is not None:
                 note_lines.append(f"Bitren: x_Rp2_abs = {_fmt_plain(x_rp2_abs, 0)} mm")
             if res.x_d_mm is not None:
@@ -1968,8 +2560,13 @@ class FBDApp(QMainWindow):
             lift_desc = tab.axis_lift_description(x_t_mm=float(res.x_t_mm), x_d_mm=res.x_d_mm)
             if lift_desc is not None:
                 note_lines.append(lift_desc)
+            reaction_limit_usages = self._reaction_limit_usages(tab, cache.points) if tab.uses_real_loads_mode() else []
+            note_lines.extend(self._reaction_limit_note_lines(reaction_limit_usages))
             if reaction_result is not None:
-                note_lines.append("Reacciones recalculadas con levante y apoyos fijos:")
+                if tab.uses_real_loads_mode():
+                    note_lines.append("Reacciones resultantes de cargas reales:")
+                else:
+                    note_lines.append("Reacciones recalculadas con levante y apoyos fijos:")
                 for pf in cache.points:
                     if pf.label in {"Rp1", "Rd", "Rt", "Rp2"}:
                         note_lines.append(
@@ -2011,6 +2608,7 @@ class FBDApp(QMainWindow):
             tab.set_view_mode("solved")
             tab.set_cache(cache)
             tab.set_note(note)
+            tab.set_reaction_limit_summary(reaction_limit_usages)
 
             self._plot_triplet(cache, set_diag_on_tab=tab)
             tab.section_panel.refresh_results_from_context()
@@ -2020,6 +2618,7 @@ class FBDApp(QMainWindow):
             tab.set_view_mode("inputs")
             tab.set_cache(None)
             tab.set_note(f"Error: {e}")
+            tab.set_reaction_limit_summary([])
             tab.set_diag(None)
 
     # Exportar gráficos
@@ -2481,16 +3080,23 @@ class FBDApp(QMainWindow):
                 hitch=hitch,
                 unknown_uniform=UnknownUniformLoad(label="q", span_start_mm=0.0, span_len_mm=Lc),
             )
-            res = solve_equilibrium(case)
+            if tab.uses_real_loads_mode():
+                res, lift_load, reaction_result = self._solve_real_loads_equilibrium(
+                    tab=tab,
+                    case=case,
+                    Lc=float(Lc),
+                )
+            else:
+                geometry_res = solve_equilibrium(case)
+                res, lift_load, reaction_result = self._solve_final_equilibrium_with_axis_lift(
+                    tab=tab,
+                    case=case,
+                    base_result=geometry_res,
+                    beam_L_mm=float(float(geometry_res.x_t_mm) + 2070.0 if tab.is_bitren else Lc),
+                )
 
             L_viga_total = float(res.x_t_mm) + 2070.0 if tab.is_bitren else float(Lc)
             beam_plot = Beam(L_mm=L_viga_total)
-            res, lift_load, reaction_result = self._solve_final_equilibrium_with_axis_lift(
-                tab=tab,
-                case=case,
-                base_result=res,
-                beam_L_mm=float(beam_plot.L_mm),
-            )
             xlim = _compute_x_view(beam_plot.L_mm, res.solved_point_forces, res.solved_dist_loads, res.solved_moments)
             diag = build_V_M(
                 beam_L_mm=beam_plot.L_mm,
@@ -2581,7 +3187,12 @@ class FBDApp(QMainWindow):
                     [
                         f"x_t = {_fmt_plain(float(res.x_t_mm), 0)} mm",
                         f"x_d = {_fmt_plain(float(res.x_d_mm), 0) if res.x_d_mm is not None else '-'} mm",
-                        f"q = {_fmt_plain(float(res.q_user_kg_per_mm), 6)} kg/mm",
+                        f"modo = {tab.load_mode()}",
+                        (
+                            "q equivalente = no aplicada"
+                            if tab.uses_real_loads_mode()
+                            else f"q = {_fmt_plain(float(res.q_user_kg_per_mm), 6)} kg/mm"
+                        ),
                     ],
                 )
                 p_stab_lat = os.path.join(tmpdir, "stab_lat.jpg")

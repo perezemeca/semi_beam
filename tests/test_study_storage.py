@@ -8,6 +8,10 @@ from docx import Document
 from PySide6.QtWidgets import QApplication, QLabel, QMessageBox, QPushButton, QScrollArea, QTableWidget, QToolButton
 
 from semi_beam.domain.loads import DistUniform, PointForce, PointMoment
+from semi_beam.domain.beam import Beam
+from semi_beam.domain.cases import BeamCase
+from semi_beam.domain.supports import FixedSupport, TandemSupport
+from semi_beam.domain.unknowns import UnknownUniformLoad
 from semi_beam.sections.i_section import ISection
 from semi_beam.services.study_storage import load_study_file, save_study_file
 from semi_beam.ui.main_window import (
@@ -393,6 +397,22 @@ def _configure_solvable_new_study(window: FBDApp):
     return tab
 
 
+def _configure_solvable_bitren_study(window: FBDApp):
+    tab = window.tab_bitren
+    window.tabs.setCurrentWidget(tab)
+    tab.Lc.setValue(13600.0)
+    tab.x_front_or_kp.setValue(1250.0)
+    tab.R_front_or_kp.setValue(14500.0)
+    tab.Rt.setValue(22200.0)
+    tab.x_rp2_rel.setValue(900.0)
+    tab.Rp2.setValue(13200.0)
+    tab.chk_show_deflection.setChecked(False)
+    tab._add_load_row(load_type="Puntual")
+    tab.tbl.item(0, tab.COL_MAG).setText("5000")
+    tab.tbl.item(0, tab.COL_POS).setText("2500")
+    return tab
+
+
 def _point_by_label(points, label: str):
     matches = [p for p in points if p.label == label]
     assert len(matches) == 1
@@ -522,6 +542,44 @@ def test_axis_lift_adds_single_first_axle_load_without_moving_tandem():
     window.close()
 
 
+def test_bitren_axis_lift_keeps_rp2_in_final_equilibrium():
+    _app()
+    window = FBDApp()
+    tab = _configure_solvable_bitren_study(window)
+
+    window._solve_for_tab(tab)
+    base_cache = tab.get_cache()
+    assert base_cache is not None
+    base_rp1 = _point_by_label(base_cache.points, "Rp1")
+    base_rp2 = _point_by_label(base_cache.points, "Rp2")
+    base_rt = _point_by_label(base_cache.points, "Rt")
+    assert base_rt.x_mm > tab.Lc.value()
+    sample_x = float(base_rt.x_mm) - tab._first_axle_offset_from_tandem_center() + 100.0
+    base_v = float(tab.get_diag().eval_V(sample_x))
+    base_m = float(tab.get_diag().eval_M(sample_x))
+
+    tab.chk_axis_lift.setChecked(True)
+    window._replot_active_tab()
+    lifted_cache = tab.get_cache()
+    assert lifted_cache is not None
+    lifted_rp1 = _point_by_label(lifted_cache.points, "Rp1")
+    lifted_rp2 = _point_by_label(lifted_cache.points, "Rp2")
+    lifted_rt = _point_by_label(lifted_cache.points, "Rt")
+    lift_load = _point_by_label(lifted_cache.points, "P_levante_primer_eje")
+
+    assert lifted_rp2.x_mm == base_rp2.x_mm
+    assert lifted_rp2.value_user == base_rp2.value_user == tab.Rp2.value()
+    assert lift_load.value_user == 1200.0
+    assert lift_load.x_mm == lifted_rt.x_mm - tab._first_axle_offset_from_tandem_center()
+    assert lifted_rt.x_mm == base_rt.x_mm
+    assert (lifted_rp1.value_user, lifted_rt.value_user) != (base_rp1.value_user, base_rt.value_user)
+    assert float(tab.get_diag().eval_V(sample_x)) != base_v
+    assert float(tab.get_diag().eval_M(sample_x)) != base_m
+    assert abs(float(tab.get_diag().eval_V(lifted_cache.beam_plot.L_mm))) < 1e-6
+    assert abs(float(tab.get_diag().eval_M(lifted_cache.beam_plot.L_mm))) < 1e-3
+    window.close()
+
+
 def test_axis_lift_directional_load_uses_directional_position():
     _app()
     window = FBDApp()
@@ -560,6 +618,542 @@ def test_axis_lift_treats_1_1_1_as_directional_lift():
     assert tab.Rt.value() == 18800.0
     assert tab.Rd.value() + tab.Rt.value() == 28000.0
     assert tab.dir_offset.value() == 2450.0
+    window.close()
+
+
+def test_unit_tab_accepts_positive_load_positions_beyond_visible_beam(tmp_path):
+    _app()
+    window = FBDApp()
+    tab = window.tab_semi
+    tab.Lc.setValue(12000.0)
+    tab.chk_show_deflection.setChecked(False)
+    tab.tbl.setRowCount(0)
+
+    tab._add_load_row(load_type="Puntual")
+    tab.tbl.item(0, tab.COL_MAG).setText("500")
+    tab.tbl.item(0, tab.COL_POS).setText("12500")
+
+    tab._add_load_row(load_type="Puntual")
+    tab.tbl.item(1, tab.COL_MAG).setText("600")
+    tab.tbl.item(1, tab.COL_POS).setText("13000")
+
+    tab._add_load_row(load_type="Momento")
+    tab.tbl.item(2, tab.COL_MAG).setText("25000")
+    tab.tbl.item(2, tab.COL_POS).setText("12750")
+
+    tab._add_load_row(load_type="Momento")
+    tab.tbl.item(3, tab.COL_MAG).setText("-15000")
+    tab.tbl.item(3, tab.COL_POS).setText("13250")
+
+    tab._add_load_row(load_type="Distribuida")
+    tab.tbl.item(4, tab.COL_MAG).setText("1200")
+    tab.tbl.item(4, tab.COL_POS).setText("12300")
+    tab.tbl.item(4, tab.COL_LEN).setText("600")
+
+    points, dists, moms, errors = tab._build_loads_from_table()
+    assert errors == []
+    assert [p.x_mm for p in points] == [12500.0, 13000.0]
+    assert [m.x_mm for m in moms] == [12750.0, 13250.0]
+    assert len(dists) == 1
+    assert dists[0].x0_mm == 12000.0
+    assert dists[0].Lq_mm == 600.0
+
+    tab.tbl.item(4, tab.COL_LEN).setText("-1")
+    _, _, _, invalid_errors = tab._build_loads_from_table()
+    assert any("longitud > 0" in error for error in invalid_errors)
+    tab.tbl.item(4, tab.COL_LEN).setText("600")
+
+    window._solve_for_tab(tab)
+    cache = tab.get_cache()
+    assert cache is not None
+    assert tab.get_diag() is not None
+
+    study_path = tmp_path / "loads_outside_beam.sbeam"
+    save_study_file(study_path, window._export_study_state())
+    restored = FBDApp()
+    restored._apply_study_state(load_study_file(study_path))
+    restored_tab = restored.tab_semi
+    assert restored_tab.tbl.item(0, restored_tab.COL_POS).text() == "12500"
+    assert restored_tab.tbl.item(1, restored_tab.COL_POS).text() == "13000"
+    assert restored_tab.tbl.item(2, restored_tab.COL_POS).text() == "12750"
+    assert restored_tab.tbl.item(3, restored_tab.COL_POS).text() == "13250"
+    assert restored_tab.tbl.item(4, restored_tab.COL_POS).text() == "12300"
+    window.close()
+    restored.close()
+
+
+def test_unit_tab_rejects_negative_load_position():
+    _app()
+    window = FBDApp()
+    tab = window.tab_semi
+    tab.Lc.setValue(12000.0)
+    tab.tbl.setRowCount(0)
+
+    tab._add_load_row(load_type="Puntual")
+    tab.tbl.item(0, tab.COL_MAG).setText("500")
+    tab.tbl.item(0, tab.COL_POS).setText("-500")
+
+    _points, _dists, _moms, errors = tab._build_loads_from_table()
+    assert any("posición no puede ser negativa" in error for error in errors)
+    window.close()
+
+
+def test_reactions_tab_accepts_positions_beyond_reference_length():
+    _app()
+    window = FBDApp()
+    tab = window.tab_reactions
+    window.tabs.setCurrentWidget(tab)
+    tab.mode.setCurrentIndex(0)
+    tab.L.setValue(12000.0)
+    tab.x_a.setValue(1250.0)
+    tab.x_b.setValue(13000.0)
+    tab.tbl.setRowCount(0)
+
+    tab._add_load_row(load_type="Puntual")
+    tab.tbl.item(0, tab.COL_MAG).setText("500")
+    tab.tbl.item(0, tab.COL_POS).setText("12500")
+
+    tab._add_load_row(load_type="Momento")
+    tab.tbl.item(1, tab.COL_MAG).setText("25000")
+    tab.tbl.item(1, tab.COL_POS).setText("12750")
+
+    tab._add_load_row(load_type="Distribuida")
+    tab.tbl.item(2, tab.COL_MAG).setText("1200")
+    tab.tbl.item(2, tab.COL_POS).setText("12300")
+    tab.tbl.item(2, tab.COL_LEN).setText("600")
+
+    loads, errors, _ = tab._build_loads()
+    assert errors == []
+    assert [load.x_mm for load in loads if isinstance(load, PointForce)] == [12500.0]
+    assert [load.x_mm for load in loads if isinstance(load, PointMoment)] == [12750.0]
+    assert [load.x0_mm for load in loads if isinstance(load, DistUniform)] == [12000.0]
+
+    tab.recompute_now()
+    assert tab._last_result is not None
+    assert "0 <= " not in tab.note_label.text()
+    assert "entre 0 y L" not in tab.note_label.text()
+    window.close()
+
+
+def test_reactions_tab_accepts_three_support_axis_beyond_reference_length():
+    _app()
+    window = FBDApp()
+    tab = window.tab_reactions
+    window.tabs.setCurrentWidget(tab)
+    tab.mode.setCurrentIndex(1)
+    tab.L.setValue(12000.0)
+    tab.x_k.setValue(1250.0)
+    tab.x_t.setValue(13200.0)
+    tab.offset.setValue(3700.0)
+    tab.x_t_min.setValue(5000.0)
+    tab.x_t_max.setValue(14000.0)
+    tab.tbl.setRowCount(0)
+
+    tab._add_load_row(load_type="Puntual")
+    tab.tbl.item(0, tab.COL_MAG).setText("500")
+    tab.tbl.item(0, tab.COL_POS).setText("12500")
+
+    tab.recompute_now()
+    assert tab._last_result is not None
+    assert "0 <= " not in tab.note_label.text()
+    assert "entre 0 y L" not in tab.note_label.text()
+    window.close()
+
+
+def test_reactions_tab_rejects_negative_position_and_invalid_dist_length():
+    _app()
+    window = FBDApp()
+    tab = window.tab_reactions
+    tab.L.setValue(12000.0)
+    tab.tbl.setRowCount(0)
+
+    tab._add_load_row(load_type="Puntual")
+    tab.tbl.item(0, tab.COL_MAG).setText("500")
+    tab.tbl.item(0, tab.COL_POS).setText("-1")
+
+    tab._add_load_row(load_type="Distribuida")
+    tab.tbl.item(1, tab.COL_MAG).setText("1200")
+    tab.tbl.item(1, tab.COL_POS).setText("1000")
+    tab.tbl.item(1, tab.COL_LEN).setText("-600")
+
+    _loads, errors, _ = tab._build_loads()
+    assert any("posición no puede ser negativa" in error for error in errors)
+    assert any("longitud > 0" in error for error in errors)
+    assert all("entre 0 y L" not in error for error in errors)
+    window.close()
+
+
+def test_unit_tabs_expose_load_mode_selector_without_changing_reactions_tab():
+    _app()
+    window = FBDApp()
+
+    for tab in (window.tab_acoplado, window.tab_semi, window.tab_bitren):
+        assert tab.cmb_load_mode.itemText(0) == "Carga distribuida equivalente"
+        assert tab.cmb_load_mode.itemText(1) == "Cargas reales"
+        assert tab.load_mode() == "Carga distribuida equivalente"
+
+    assert not hasattr(window.tab_reactions, "cmb_load_mode")
+    window.close()
+
+
+def test_real_load_changes_do_not_add_mode_flow_to_reactions_tab():
+    _app()
+    window = FBDApp()
+
+    assert not hasattr(window.tab_reactions, "cmb_load_mode")
+    assert "Buscar (cumplir" in window.tab_reactions.btn_search.text()
+    assert window.tab_reactions.btn_search_best.text() == "Buscar mejor margen"
+    window.close()
+
+
+def test_load_mode_roundtrip_and_legacy_default(tmp_path):
+    _app()
+    window = FBDApp()
+    window.tab_acoplado.cmb_load_mode.setCurrentText("Carga distribuida equivalente")
+    window.tab_semi.cmb_load_mode.setCurrentText("Cargas reales")
+    window.tab_bitren.cmb_load_mode.setCurrentText("Cargas reales")
+
+    payload = window._export_study_state()
+    study_path = tmp_path / "load_modes.sbeam"
+    save_study_file(study_path, payload)
+
+    restored = FBDApp()
+    restored._apply_study_state(load_study_file(study_path))
+    assert restored.tab_acoplado.load_mode() == "Carga distribuida equivalente"
+    assert restored.tab_semi.load_mode() == "Cargas reales"
+    assert restored.tab_bitren.load_mode() == "Cargas reales"
+
+    legacy_payload = dict(payload)
+    legacy_tabs = {
+        key: dict(value)
+        for key, value in payload["tabs"].items()
+    }
+    for key in ("acoplado", "semirremolque", "bitren"):
+        legacy_tabs[key].pop("load_mode", None)
+    legacy_payload["tabs"] = legacy_tabs
+
+    legacy = FBDApp()
+    legacy._apply_study_state(legacy_payload)
+    assert legacy.tab_acoplado.load_mode() == "Carga distribuida equivalente"
+    assert legacy.tab_semi.load_mode() == "Carga distribuida equivalente"
+    assert legacy.tab_bitren.load_mode() == "Carga distribuida equivalente"
+    window.close()
+    restored.close()
+    legacy.close()
+
+
+def test_real_load_mode_uses_table_loads_without_equivalent_q():
+    _app()
+    window = FBDApp()
+    tab = _configure_solvable_new_study(window)
+    tab.cmb_load_mode.setCurrentText("Cargas reales")
+    tab.tbl.setRowCount(0)
+
+    tab._add_load_row(load_type="Puntual")
+    tab.tbl.item(0, tab.COL_MAG).setText("5000")
+    tab.tbl.item(0, tab.COL_POS).setText("2500")
+
+    tab._add_load_row(load_type="Distribuida")
+    tab.tbl.item(1, tab.COL_MAG).setText("1200")
+    tab.tbl.item(1, tab.COL_POS).setText("6000")
+    tab.tbl.item(1, tab.COL_LEN).setText("600")
+
+    tab._add_load_row(load_type="Momento")
+    tab.tbl.item(2, tab.COL_MAG).setText("25000")
+    tab.tbl.item(2, tab.COL_POS).setText("7000")
+
+    window._solve_for_tab(tab)
+    cache = tab.get_cache()
+    assert cache is not None
+    assert tab.view_mode() == "solved"
+    assert tab.get_diag() is not None
+    assert "Modo de carga = Cargas reales" in cache.note_text
+    assert "q equivalente automática = no aplicada" in cache.note_text
+    assert not any(load.label == "q" for load in cache.dists)
+    assert [load.label for load in cache.dists] == ["q1"]
+    assert _point_by_label(cache.points, "P1").x_mm == 2500.0
+    assert cache.moms[0].label == "M1"
+    assert not tab.lbl_reaction_limits.isHidden()
+    assert "Uso de límites admisibles" in tab.lbl_reaction_limits.text()
+    assert "Rp1:" in tab.lbl_reaction_limits.text()
+    assert "Rt:" in tab.lbl_reaction_limits.text()
+    assert "% del límite" in tab.lbl_reaction_limits.text()
+    window.close()
+
+
+def test_real_load_mode_does_not_call_equivalent_geometry_solver(monkeypatch):
+    import semi_beam.ui.main_window as main_window
+
+    _app()
+    window = FBDApp()
+    tab = _configure_solvable_new_study(window)
+    tab.cmb_load_mode.setCurrentText("Cargas reales")
+
+    def fail_solve_equilibrium(_case):
+        raise AssertionError("solve_equilibrium must not run in real load mode")
+
+    monkeypatch.setattr(main_window, "solve_equilibrium", fail_solve_equilibrium)
+
+    window._solve_for_tab(tab)
+
+    cache = tab.get_cache()
+    assert cache is not None
+    assert "Busqueda x_t" in cache.note_text
+    assert "q equivalente autom" in cache.note_text
+    assert "geometr" not in cache.note_text.lower()
+    window.close()
+
+
+def test_real_load_manual_fixed_tandem_candidate_matches_two_support_equilibrium():
+    _app()
+    window = FBDApp()
+    tab = window.tab_semi
+    tab.R_front_or_kp.setValue(7000.0)
+    tab.Rt.setValue(6000.0)
+    case = BeamCase(
+        beam=Beam(L_mm=12000.0),
+        point_forces=[
+            PointForce(label="P1", x_mm=3000.0, value_user=6000.0),
+            PointForce(label="P2", x_mm=7000.0, value_user=4000.0),
+        ],
+        dist_loads=[],
+        moments=[],
+        kingpin=FixedSupport(label="Rp1", x_mm=0.0, reaction_user=0.0),
+        tandem=TandemSupport(label="Rt", reaction_user=0.0),
+        unknown_uniform=UnknownUniformLoad(label="q", span_start_mm=0.0, span_len_mm=12000.0),
+    )
+
+    candidate = window._evaluate_real_load_candidate(
+        tab=tab,
+        case=case,
+        beam_L_mm=12000.0,
+        x_t=8000.0,
+    )
+    by_label = {point.label: point for point in candidate.support_points}
+
+    assert abs(by_label["Rp1"].value_user - 4250.0) < 1e-6
+    assert abs(by_label["Rt"].value_user - 5750.0) < 1e-6
+    assert candidate.feasible is True
+    window.close()
+
+
+def test_real_load_tandem_search_finds_admissible_position_by_documented_criterion():
+    _app()
+    window = FBDApp()
+    tab = window.tab_semi
+    tab.Lc.setValue(12000.0)
+    tab.x_front_or_kp.setValue(0.0)
+    tab.R_front_or_kp.setValue(7000.0)
+    tab.Rt.setValue(6000.0)
+    case = BeamCase(
+        beam=Beam(L_mm=12000.0),
+        point_forces=[
+            PointForce(label="P1", x_mm=3000.0, value_user=6000.0),
+            PointForce(label="P2", x_mm=7000.0, value_user=4000.0),
+        ],
+        dist_loads=[],
+        moments=[],
+        kingpin=FixedSupport(label="Rp1", x_mm=0.0, reaction_user=0.0),
+        tandem=TandemSupport(label="Rt", reaction_user=0.0),
+        unknown_uniform=UnknownUniformLoad(label="q", span_start_mm=0.0, span_len_mm=12000.0),
+    )
+
+    at_7000 = window._evaluate_real_load_candidate(tab=tab, case=case, beam_L_mm=12000.0, x_t=7000.0)
+    at_8000 = window._evaluate_real_load_candidate(tab=tab, case=case, beam_L_mm=12000.0, x_t=8000.0)
+    search = window._search_real_load_tandem_position(tab=tab, case=case, Lc=12000.0)
+
+    assert at_7000.feasible is False
+    assert at_8000.feasible is True
+    assert search.feasible_count > 0
+    assert search.candidate.feasible is True
+    assert search.candidate.max_usage_pct <= at_8000.max_usage_pct
+    window.close()
+
+
+def test_real_load_search_range_is_lc_half_to_lc_plus_3000_for_all_unit_tabs():
+    _app()
+    window = FBDApp()
+
+    for tab in (window.tab_acoplado, window.tab_semi, window.tab_bitren):
+        tab.Lc.setValue(12400.0)
+        tab.x_front_or_kp.setValue(0.0)
+        hitch = None
+        if tab.is_bitren:
+            tab.x_rp2_rel.setValue(1800.0)
+            tab.Rp2.setValue(13200.0)
+            hitch = FixedSupport(label="Rp2", x_mm=14200.0, reaction_user=13200.0)
+        case = BeamCase(
+            beam=Beam(L_mm=12400.0),
+            point_forces=[],
+            dist_loads=[],
+            moments=[],
+            kingpin=FixedSupport(label="Rp1", x_mm=0.0, reaction_user=0.0),
+            tandem=TandemSupport(label="Rt", reaction_user=0.0),
+            hitch=hitch,
+            unknown_uniform=UnknownUniformLoad(label="q", span_start_mm=0.0, span_len_mm=12400.0),
+        )
+
+        lo, hi, step = window._real_load_search_range(tab=tab, case=case, Lc=12400.0)
+        values = window._iter_real_load_xt_candidates(lo, hi, step)
+
+        assert lo == 6200.0
+        assert hi == 15400.0
+        assert 12950.0 in values
+        assert hi > tab.Lc.value()
+
+    window.close()
+
+
+def test_bitren_real_load_search_allows_tandem_before_rp2_and_keeps_rp2():
+    _app()
+    window = FBDApp()
+    tab = window.tab_bitren
+    tab.cmb_load_mode.setCurrentText("Cargas reales")
+    tab.Lc.setValue(12400.0)
+    tab.x_front_or_kp.setValue(0.0)
+    tab.R_front_or_kp.setValue(20000.0)
+    tab.Rt.setValue(25000.0)
+    tab.x_rp2_rel.setValue(1800.0)
+    tab.Rp2.setValue(13200.0)
+    case = BeamCase(
+        beam=Beam(L_mm=12400.0),
+        point_forces=[
+            PointForce(label="P1", x_mm=3000.0, value_user=6000.0),
+            PointForce(label="P2", x_mm=7000.0, value_user=4000.0),
+        ],
+        dist_loads=[],
+        moments=[],
+        kingpin=FixedSupport(label="Rp1", x_mm=0.0, reaction_user=0.0),
+        tandem=TandemSupport(label="Rt", reaction_user=0.0),
+        hitch=FixedSupport(label="Rp2", x_mm=14200.0, reaction_user=13200.0),
+        unknown_uniform=UnknownUniformLoad(label="q", span_start_mm=0.0, span_len_mm=12400.0),
+    )
+
+    lo, hi, step = window._real_load_search_range(tab=tab, case=case, Lc=12400.0)
+    values = window._iter_real_load_xt_candidates(lo, hi, step)
+    candidate = window._evaluate_real_load_candidate(
+        tab=tab,
+        case=case,
+        beam_L_mm=15400.0,
+        x_t=12950.0,
+    )
+    by_label = {point.label: point for point in candidate.support_points}
+
+    assert 12950.0 in values
+    assert 12950.0 < 14200.0
+    assert by_label["Rt"].x_mm == 12950.0
+    assert by_label["Rp2"].x_mm == 14200.0
+    assert by_label["Rp2"].value_user == 13200.0
+    window.close()
+
+
+def test_real_load_tandem_search_reports_no_admissible_position():
+    _app()
+    window = FBDApp()
+    tab = window.tab_semi
+    tab.cmb_load_mode.setCurrentText("Cargas reales")
+    tab.Lc.setValue(12000.0)
+    tab.x_front_or_kp.setValue(0.0)
+    tab.R_front_or_kp.setValue(1000.0)
+    tab.Rt.setValue(1000.0)
+    tab.tbl.setRowCount(0)
+    tab._add_load_row(load_type="Puntual")
+    tab.tbl.item(0, tab.COL_MAG).setText("6000")
+    tab.tbl.item(0, tab.COL_POS).setText("3000")
+    tab._add_load_row(load_type="Puntual")
+    tab.tbl.item(1, tab.COL_MAG).setText("4000")
+    tab.tbl.item(1, tab.COL_POS).setText("7000")
+
+    window._solve_for_tab(tab)
+
+    cache = tab.get_cache()
+    assert cache is not None
+    assert "no se encontro posicion admisible" in cache.note_text
+    assert "excedido" in cache.note_text
+    window.close()
+
+
+def test_real_load_reaction_fields_explain_limit_semantics_without_breaking_equivalent_mode():
+    _app()
+    window = FBDApp()
+    tab = window.tab_semi
+
+    assert "limite admisible" in tab.R_front_or_kp.toolTip()
+    assert "limite admisible" in tab.Rt.toolTip()
+    assert "carga equivalente" in tab.R_front_or_kp.toolTip()
+    assert tab.load_mode() == "Carga distribuida equivalente"
+    window.close()
+
+
+def test_equivalent_load_mode_keeps_reaction_limit_summary_hidden():
+    _app()
+    window = FBDApp()
+    tab = _configure_solvable_new_study(window)
+    tab.cmb_load_mode.setCurrentText("Carga distribuida equivalente")
+
+    window._solve_for_tab(tab)
+
+    cache = tab.get_cache()
+    assert cache is not None
+    assert "q calculada" in cache.note_text
+    assert "Uso de límites admisibles" not in cache.note_text
+    assert not tab.lbl_reaction_limits.isVisible()
+    assert tab.lbl_reaction_limits.text() == ""
+    window.close()
+
+
+def test_real_load_reaction_limit_usage_formula_and_status_colors():
+    _app()
+    window = FBDApp()
+    tab = window.tab_acoplado
+    tab.R_front_or_kp.setValue(10000.0)
+    tab.Rt.setValue(10000.0)
+    points = [
+        PointForce(label="Rp1", x_mm=0.0, value_user=10860.0),
+        PointForce(label="Rt", x_mm=1000.0, value_user=3940.0),
+    ]
+
+    usages = window._reaction_limit_usages(tab, points)
+    by_label = {usage.label: usage for usage in usages}
+
+    assert abs(by_label["Rp1"].percent - 108.6) < 1e-9
+    assert by_label["Rp1"].exceeded is True
+    assert by_label["Rp1"].status == "excedido"
+    assert abs(by_label["Rt"].percent - 39.4) < 1e-9
+    assert by_label["Rt"].exceeded is False
+    assert by_label["Rt"].status == "admisible"
+
+    tab.set_reaction_limit_summary(usages)
+    summary = tab.lbl_reaction_limits.text()
+    assert "#B00020" in summary
+    assert "#0A7F2E" in summary
+    assert "108.6 % del límite" in summary
+    assert "39.4 % del límite" in summary
+    window.close()
+
+
+def test_bitren_real_load_mode_keeps_rp2():
+    _app()
+    window = FBDApp()
+    tab = _configure_solvable_bitren_study(window)
+    tab.cmb_load_mode.setCurrentText("Cargas reales")
+
+    window._solve_for_tab(tab)
+    cache = tab.get_cache()
+    assert cache is not None
+    rp2 = _point_by_label(cache.points, "Rp2")
+    assert rp2.value_user == tab.Rp2.value()
+    assert "q equivalente automática = no aplicada" in cache.note_text
+    assert not any(load.label == "q" for load in cache.dists)
+    assert tab.get_diag() is not None
+    assert "Uso de límites admisibles" in cache.note_text
+    assert "Rp1:" in cache.note_text
+    assert "límite 14500 kg" in cache.note_text
+    assert "Rt:" in cache.note_text
+    assert "límite 22200 kg" in cache.note_text
+    assert "Rp2:" in cache.note_text
+    assert "límite 13200 kg" in cache.note_text
+    assert not tab.lbl_reaction_limits.isHidden()
     window.close()
 
 

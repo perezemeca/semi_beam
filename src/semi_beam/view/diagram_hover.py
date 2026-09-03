@@ -48,6 +48,21 @@ class DiagramHoverInspector:
         self._figure_leave_cid = None
         self.hide()
 
+    def replace_curve(self, ax, curve: Optional[HoverCurve]) -> None:
+        """Replace one subplot curve without discarding hover state on other axes."""
+        self.curves = [current for current in self.curves if current.ax is not ax]
+        if curve is not None:
+            self.curves.append(curve)
+        for artists in (self._markers, self._annotations):
+            artist = artists.pop(ax, None)
+            if artist is not None:
+                try:
+                    artist.remove()
+                except (NotImplementedError, ValueError):
+                    pass
+        if self._visible_ax is ax:
+            self._visible_ax = None
+
     def hide(self) -> None:
         changed = False
         for artist in list(self._markers.values()) + list(self._annotations.values()):

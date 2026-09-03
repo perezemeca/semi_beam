@@ -109,7 +109,8 @@ def _make_annotation(ax, xy, text: str, dx_pts: float, dy_pts: float, color: str
 
 def _annotation_text_bbox(ann, renderer) -> Bbox:
     try:
-        ann.draw(renderer)
+        ann.update_positions(renderer)
+        ann.update_bbox_position_size(renderer)
     except Exception:
         pass
     patch = ann.get_bbox_patch()

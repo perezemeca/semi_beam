@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from PySide6.QtCore import Qt, QThread, QTimer, Signal
+from PySide6.QtCore import QSignalBlocker, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QColor, QBrush
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -662,33 +662,41 @@ class SemiTrailerReactionsTab(QWidget):
         return -1
 
     def _set_item_editable(self, row: int, col: int, editable: bool):
-        it = self.tbl.item(row, col)
-        if it is None:
-            _set_item(self.tbl, row, col, "")
-            it = self.tbl.item(row, col)
-        if it is None:
-            return
-        flags = it.flags()
-        if editable:
-            it.setFlags(flags | Qt.ItemIsEditable)
-        else:
-            it.setFlags(flags & ~Qt.ItemIsEditable)
-        self._apply_row_visual_state(row, has_error=False)
-
-    def _apply_row_visual_state(self, row: int, *, has_error: bool):
-        fg = QBrush(QColor(TABLE_TEXT_COLOR))
-        editable_bg = QBrush(QColor(TABLE_ERROR_BG if has_error else TABLE_INPUT_BG))
-        readonly_bg = QBrush(QColor(TABLE_ERROR_BG if has_error else TABLE_READONLY_BG))
-        for col in range(1, self.tbl.columnCount()):
+        blocker = QSignalBlocker(self.tbl)
+        try:
             it = self.tbl.item(row, col)
             if it is None:
                 _set_item(self.tbl, row, col, "")
                 it = self.tbl.item(row, col)
             if it is None:
-                continue
-            editable = bool(it.flags() & Qt.ItemIsEditable)
-            it.setBackground(editable_bg if editable else readonly_bg)
-            it.setForeground(fg)
+                return
+            flags = it.flags()
+            if editable:
+                it.setFlags(flags | Qt.ItemIsEditable)
+            else:
+                it.setFlags(flags & ~Qt.ItemIsEditable)
+            self._apply_row_visual_state(row, has_error=False)
+        finally:
+            blocker.unblock()
+
+    def _apply_row_visual_state(self, row: int, *, has_error: bool):
+        fg = QBrush(QColor(TABLE_TEXT_COLOR))
+        editable_bg = QBrush(QColor(TABLE_ERROR_BG if has_error else TABLE_INPUT_BG))
+        readonly_bg = QBrush(QColor(TABLE_ERROR_BG if has_error else TABLE_READONLY_BG))
+        blocker = QSignalBlocker(self.tbl)
+        try:
+            for col in range(1, self.tbl.columnCount()):
+                it = self.tbl.item(row, col)
+                if it is None:
+                    _set_item(self.tbl, row, col, "")
+                    it = self.tbl.item(row, col)
+                if it is None:
+                    continue
+                editable = bool(it.flags() & Qt.ItemIsEditable)
+                it.setBackground(editable_bg if editable else readonly_bg)
+                it.setForeground(fg)
+        finally:
+            blocker.unblock()
         combo = self.tbl.cellWidget(row, self.COL_TYPE)
         if combo is not None:
             combo.setStyleSheet(combo_cell_style(TABLE_ERROR_BG if has_error else TABLE_INPUT_BG))
@@ -740,7 +748,6 @@ class SemiTrailerReactionsTab(QWidget):
         errors: List[str] = []
         dist_rows: List[int] = []
         dist_intervals: List[Tuple[float, float]] = []
-        L = float(self.L.value())
         p_count = 0
         d_count = 0
         m_count = 0
@@ -756,20 +763,15 @@ class SemiTrailerReactionsTab(QWidget):
             if mag is None or pos is None:
                 errors.append(f"Fila {row + 1}: complete magnitud y posición.")
                 row_has_error = True
+            elif float(pos) < 0.0:
+                errors.append(f"Fila {row + 1}: la posición no puede ser negativa.")
+                row_has_error = True
             elif load_type == "Puntual":
-                if not (0.0 <= pos <= L):
-                    errors.append(f"Fila {row + 1}: la carga puntual debe estar dentro de [0, L].")
-                    row_has_error = True
-                else:
-                    p_count += 1
-                    loads.append(PointForce(label=f"P{p_count}", x_mm=float(pos), value_user=float(mag)))
+                p_count += 1
+                loads.append(PointForce(label=f"P{p_count}", x_mm=float(pos), value_user=float(mag)))
             elif load_type == "Momento":
-                if not (0.0 <= pos <= L):
-                    errors.append(f"Fila {row + 1}: el momento puntual debe estar dentro de [0, L].")
-                    row_has_error = True
-                else:
-                    m_count += 1
-                    loads.append(PointMoment(label=f"M{m_count}", x_mm=float(pos), M_user_kgmm=float(mag)))
+                m_count += 1
+                loads.append(PointMoment(label=f"M{m_count}", x_mm=float(pos), M_user_kgmm=float(mag)))
             else:
                 if length is None or length <= 0.0:
                     errors.append(f"Fila {row + 1}: la distribuida requiere longitud > 0.")
@@ -781,21 +783,17 @@ class SemiTrailerReactionsTab(QWidget):
                         errors.append(f"Fila {row + 1}: {exc}")
                         row_has_error = True
                     else:
-                        if x1 < 0.0 or x2 > L:
-                            errors.append(f"Fila {row + 1}: el tramo distribuido debe quedar dentro de [0, L].")
-                            row_has_error = True
-                        else:
-                            d_count += 1
-                            dist_rows.append(row)
-                            dist_intervals.append((x1, x2))
-                            loads.append(
-                                DistUniform(
-                                    label=f"q{d_count}",
-                                    x0_mm=x1,
-                                    Lq_mm=float(length),
-                                    q_user=float(mag) / float(length),
-                                )
+                        d_count += 1
+                        dist_rows.append(row)
+                        dist_intervals.append((x1, x2))
+                        loads.append(
+                            DistUniform(
+                                label=f"q{d_count}",
+                                x0_mm=x1,
+                                Lq_mm=float(length),
+                                q_user=float(mag) / float(length),
                             )
+                        )
 
             if row_has_error:
                 self._row_error(row, True)
@@ -831,8 +829,10 @@ class SemiTrailerReactionsTab(QWidget):
         if self.mode.currentIndex() == 0:
             xa = float(self.x_a.value())
             xb = float(self.x_b.value())
-            if not (0.0 <= xa < xb <= L):
-                errors.append("En 2 apoyos se requiere 0 <= x_A < x_B <= L.")
+            if xa < 0.0 or xb < 0.0:
+                errors.append("En 2 apoyos se requiere x_A >= 0 y x_B >= 0.")
+            elif not (xa < xb):
+                errors.append("En 2 apoyos se requiere x_A < x_B.")
         else:
             xk = float(self.x_k.value())
             xt = float(self.x_t.value())
@@ -840,8 +840,10 @@ class SemiTrailerReactionsTab(QWidget):
             xd = xt - off
             xt_min = float(self.x_t_min.value())
             xt_max = float(self.x_t_max.value())
-            if not (0.0 <= xk < xd < xt <= L):
-                errors.append("En 3 apoyos se requiere 0 <= x_k < x_d < x_t <= L.")
+            if xk < 0.0 or xd < 0.0 or xt < 0.0:
+                errors.append("En 3 apoyos se requiere x_k >= 0, x_d >= 0 y x_t >= 0.")
+            elif not (xk < xd < xt):
+                errors.append("En 3 apoyos se requiere x_k < x_d < x_t.")
             if xt_min > xt_max:
                 errors.append("Debe cumplirse x_t_min <= x_t_max.")
             if not (xt_min <= xt <= xt_max):
